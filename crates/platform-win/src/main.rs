@@ -226,6 +226,27 @@ impl App {
         self.term.scroll(Scroll::Bottom);
     }
 
+    fn zoom(&mut self, steps: i32) {
+        let target = render::step_font_size(self.renderer.font_size(), steps);
+        self.apply_font_size(target);
+    }
+
+    fn apply_font_size(&mut self, px: f32) {
+        if !self.renderer.set_font_size(px) {
+            return;
+        }
+        let (w, h) = self.window_px();
+        let new = self.renderer.grid_size(w, h);
+        if new != self.size {
+            self.size = new;
+            self.term.resize(new);
+            if let Some(pty) = self.pty.as_ref() {
+                let _ = pty.resize(new);
+            }
+        }
+        self.redraw_soon();
+    }
+
     fn cursor_look(&self) -> CursorLook {
         if !self.focused {
             return CursorLook::Hollow;
@@ -399,6 +420,22 @@ impl ApplicationHandler for App {
                     return;
                 }
                 if self.mods.ctrl {
+                    let zoom = match &event.logical_key {
+                        WKey::Character(c) if c == "+" || c == "=" => Some(1),
+                        WKey::Character(c) if c == "-" => Some(-1),
+                        WKey::Character(c) if c == "0" => Some(0),
+                        _ => None,
+                    };
+                    if let Some(steps) = zoom {
+                        if steps == 0 {
+                            let base = env_or("FOOTWIN_FONT_PX", FONT_PX);
+                            self.apply_font_size(base);
+                        } else {
+                            self.zoom(steps);
+                        }
+                        return;
+                    }
+
                     match &event.logical_key {
                         WKey::Character(c) if c.eq_ignore_ascii_case("c") => {
                             // Ctrl+C only copies when there is a screen selection;
@@ -506,6 +543,14 @@ impl ApplicationHandler for App {
             } => {
                 self.paste();
                 self.redraw_soon();
+            }
+
+            WindowEvent::MouseWheel { delta, .. } if self.mods.ctrl => {
+                let up = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y > 0.0,
+                    MouseScrollDelta::PixelDelta(p) => p.y > 0.0,
+                };
+                self.zoom(if up { 1 } else { -1 });
             }
 
             WindowEvent::MouseWheel { delta, .. } => {

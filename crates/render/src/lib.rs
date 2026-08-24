@@ -18,6 +18,9 @@ pub enum CursorLook {
     Hidden,
 }
 
+pub const MIN_FONT_PX: f32 = 6.0;
+pub const MAX_FONT_PX: f32 = 72.0;
+
 // foot's own defaults, taken from upstream/foot/config.c:33-68. The man page
 // still documents the old Solarized values; the code is what ships.
 pub const DEFAULT_FG: u32 = 0x00ff_ffff;
@@ -91,18 +94,15 @@ impl Renderer {
         )
         .map_err(|e| anyhow::anyhow!("fontdue: {e}"))?;
 
-        let lm = font
-            .horizontal_line_metrics(px)
+        let (cell_w, cell_h, baseline) = metrics(&font, px)
             .ok_or_else(|| anyhow::anyhow!("font has no horizontal line metrics"))?;
-        let cell_h = (lm.ascent - lm.descent + lm.line_gap).ceil().max(1.0) as usize;
-        let cell_w = font.metrics('M', px).advance_width.ceil().max(1.0) as usize;
 
         Ok(Self {
             font,
             px,
             cell_w,
             cell_h,
-            baseline: lm.ascent.ceil() as i32,
+            baseline,
             palette: build_palette(),
             glyphs: HashMap::new(),
             pad: 0,
@@ -113,6 +113,29 @@ impl Renderer {
 
     pub fn cell_size(&self) -> (usize, usize) {
         (self.cell_w, self.cell_h)
+    }
+
+    pub fn font_size(&self) -> f32 {
+        self.px
+    }
+
+    /// Re-rasterises at the new size instead of scaling the bitmaps, so glyphs
+    /// stay crisp. The caller must recompute the grid afterwards: the cell
+    /// changed size, so the terminal now holds a different number of them.
+    pub fn set_font_size(&mut self, px: f32) -> bool {
+        let px = px.clamp(MIN_FONT_PX, MAX_FONT_PX);
+        if (px - self.px).abs() < 0.01 {
+            return false;
+        }
+        let Some((cell_w, cell_h, baseline)) = metrics(&self.font, px) else {
+            return false;
+        };
+        self.px = px;
+        self.cell_w = cell_w;
+        self.cell_h = cell_h;
+        self.baseline = baseline;
+        self.glyphs.clear();
+        true
     }
 
     pub fn set_padding(&mut self, pad: usize) {
@@ -372,6 +395,27 @@ impl Renderer {
     }
 }
 
+/// One zoom step. Multiplicative so a step feels the same at any size, rounded
+/// to whole pixels so cell metrics stay crisp, and nudged so it always moves by
+/// at least one pixel (rounding would otherwise swallow small steps).
+pub fn step_font_size(current: f32, steps: i32) -> f32 {
+    if steps == 0 {
+        return current;
+    }
+    let mut target = (current * 1.15f32.powi(steps)).round();
+    if (target - current).abs() < 1.0 {
+        target = current + steps.signum() as f32;
+    }
+    target.clamp(MIN_FONT_PX, MAX_FONT_PX)
+}
+
+fn metrics(font: &Font, px: f32) -> Option<(usize, usize, i32)> {
+    let lm = font.horizontal_line_metrics(px)?;
+    let cell_h = (lm.ascent - lm.descent + lm.line_gap).ceil().max(1.0) as usize;
+    let cell_w = font.metrics('M', px).advance_width.ceil().max(1.0) as usize;
+    Some((cell_w, cell_h, lm.ascent.ceil() as i32))
+}
+
 fn blend(bg: u32, fg: u32, a: u8) -> u32 {
     let mix = |shift: u32| {
         let b = ((bg >> shift) & 0xff) as i32;
@@ -526,6 +570,83 @@ mod tests {
             .count();
         assert!(rows <= 2, "el subrayado ocupa {rows} filas");
         assert_eq!(painted_columns(CursorLook::Underline), cw);
+    }
+
+    #[test]
+    fn zooming_in_grows_the_cell_and_shrinks_the_grid() {
+        let mut r = renderer();
+        let (w0, h0) = r.cell_size();
+        let cols0 = r.grid_size(800, 600).columns;
+
+        assert!(r.set_font_size(28.0));
+        let (w1, h1) = r.cell_size();
+        assert!(w1 > w0 && h1 > h0, "{w0}x{h0} -> {w1}x{h1}");
+        assert!(
+            r.grid_size(800, 600).columns < cols0,
+            "deberian entrar menos columnas"
+        );
+    }
+
+    #[test]
+    fn zooming_out_shrinks_the_cell() {
+        let mut r = renderer();
+        let (w0, _) = r.cell_size();
+        assert!(r.set_font_size(9.0));
+        assert!(r.cell_size().0 < w0);
+    }
+
+    #[test]
+    fn font_size_is_clamped_and_reports_no_change() {
+        let mut r = renderer();
+        r.set_font_size(1000.0);
+        assert_eq!(r.font_size(), MAX_FONT_PX);
+        // Ya esta en el tope: pedir mas no cambia nada.
+        assert!(!r.set_font_size(1000.0));
+
+        r.set_font_size(0.1);
+        assert_eq!(r.font_size(), MIN_FONT_PX);
+    }
+
+    #[test]
+    fn glyphs_are_rerasterised_not_scaled() {
+        let mut r = renderer();
+        let small = r.glyph('M').coverage.len();
+        r.set_font_size(32.0);
+        let big = r.glyph('M').coverage.len();
+        assert!(
+            big > small,
+            "el glifo deberia rasterizarse mas grande: {small} -> {big}"
+        );
+    }
+
+    #[test]
+    fn a_zoom_step_always_moves_at_least_one_pixel() {
+        // Rounding a 15% step can land back on the same integer at small sizes,
+        // which would make the key feel dead. Boundaries are excluded: there the
+        // clamp is supposed to stop the move.
+        for size in [7.0f32, 8.0, 10.0, 16.0, 24.0] {
+            assert!(step_font_size(size, 1) > size, "no subio desde {size}");
+            assert!(step_font_size(size, -1) < size, "no bajo desde {size}");
+        }
+    }
+
+    #[test]
+    fn zoom_steps_are_clamped_to_the_allowed_range() {
+        assert_eq!(step_font_size(MAX_FONT_PX, 1), MAX_FONT_PX);
+        assert_eq!(step_font_size(MIN_FONT_PX, -1), MIN_FONT_PX);
+        assert_eq!(step_font_size(1000.0, 1), MAX_FONT_PX);
+    }
+
+    #[test]
+    fn zero_steps_changes_nothing() {
+        assert_eq!(step_font_size(16.0, 0), 16.0);
+    }
+
+    #[test]
+    fn zoom_in_then_out_lands_near_the_start() {
+        let start = 16.0;
+        let out = step_font_size(step_font_size(start, 1), -1);
+        assert!((out - start).abs() <= 1.0, "{start} -> {out}");
     }
 
     #[test]
