@@ -268,7 +268,7 @@ plantilla de Windows, no sirve.
 Ordenado para que **lo más arriesgado se descubra primero** y para tener algo
 usable lo antes posible.
 
-### Fase 0 — Espiga vertical (1-2 semanas)
+### Fase 0 — Corte vertical (1-2 semanas)
 ConPTY + `alacritty_terminal` + render de un grid en pantalla, sin config, sin
 temas, sin nada. Que se vea un `dir` funcionando.
 **Objetivo real:** validar el stack antes de invertir. Si algo va a salir mal, sale
