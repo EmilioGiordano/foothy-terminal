@@ -4,9 +4,11 @@ argument-hint: "[PR number] (defaults to the PR for the current branch)"
 allowed-tools: Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh pr comment:*), Bash(gh api:*), Bash(git log:*), Bash(git diff:*), Bash(cargo test:*), Bash(cargo clippy:*), Read, Grep, Glob
 ---
 
-Review pull request **$1** in this repository. With no argument, use the PR for the current branch.
+Target PR: `$1`
 
-Read the diff with `gh pr diff` and the description with `gh pr view`. Read surrounding code when the diff alone is not enough to judge a change — a hunk that looks fine in isolation is often wrong in context.
+If that is empty, review the PR for the current branch — `gh pr view` and `gh pr diff` resolve it on their own when given no number.
+
+Read the diff and the description first. Read surrounding code when the diff alone is not enough to judge a change: a hunk that looks fine in isolation is often wrong in context.
 
 ## What to look for, in priority order
 
