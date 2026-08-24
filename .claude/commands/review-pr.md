@@ -33,8 +33,15 @@ Every `unsafe` block must be justified by the surrounding code. Check handle and
 **5. Tests.**
 New logic in layers 1–2.5 should be testable without a window, and usually is. Flag behaviour that could have had a headless test and did not get one, and tests that assert an implementation detail rather than the behaviour a user would notice.
 
-**6. Conventions** (`CLAUDE.md`).
-Comments only for important non-obvious rules, in English, brief. Commits small and file-scoped. Flag narrated comments and oversized commits.
+**6. Project standards** (`CLAUDE.md`).
+Three of these are not visible in the diff, so look them up: run `gh pr view --json headRefName,commits` or `git log --oneline main..HEAD` before judging them.
+
+- *Comments*: only for a rule that is important and not already obvious from the code — something whose removal would let someone reintroduce a bug. English, brief. Flag narration, commented-out code, and comments that restate the line below them.
+- *Commit granularity*: one commit per file or per single focused aspect. Two or three files together only when the changes are minimal. Flag any commit touching a large set of files, and any single commit carrying several unrelated changes.
+- *Commit messages*: one short English line, `type/short description` — slash, not colon. No body, no trailers. Types: `core`, `feat`, `fix`, `ui`, `docs`, `test`, `chore`, `refactor`, `perf`, `build`. Flag Spanish, multi-line messages, and missing or wrong types.
+- *Branch name*: English, descriptive, self-explanatory. Flag Spanish or opaque names.
+
+Report these in a short separate section of the summary, not as inline comments — they are about the history, not about a line.
 
 ## How to report
 
