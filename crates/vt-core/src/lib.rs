@@ -5,6 +5,7 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::Config;
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::Processor;
 
 pub mod pty;
@@ -51,6 +52,7 @@ pub struct Terminal {
     term: Term<EventSink>,
     parser: Processor,
     events: Receiver<Event>,
+    pending: Vec<Event>,
 }
 
 impl Terminal {
@@ -65,6 +67,7 @@ impl Terminal {
             term,
             parser: Processor::new(),
             events,
+            pending: Vec::new(),
         }
     }
 
@@ -72,23 +75,40 @@ impl Terminal {
         self.parser.advance(&mut self.term, bytes);
     }
 
-    pub fn drain_events(&self) -> Vec<Event> {
-        let mut out = Vec::new();
+    fn pump(&mut self) {
         while let Ok(event) = self.events.try_recv() {
-            out.push(event);
+            self.pending.push(event);
         }
+    }
+
+    /// Returns every event except `PtyWrite`, which only [`Terminal::take_pty_replies`] consumes.
+    pub fn drain_events(&mut self) -> Vec<Event> {
+        self.pump();
+        let mut out = Vec::new();
+        self.pending.retain(|event| {
+            if matches!(event, Event::PtyWrite(_)) {
+                true
+            } else {
+                out.push(event.clone());
+                false
+            }
+        });
         out
     }
 
     // ConPTY probes with DSR (`ESC [ 6 n`) and blocks the child until answered.
     // Dropping these replies deadlocks the terminal on startup.
-    pub fn take_pty_replies(&self) -> Vec<u8> {
+    pub fn take_pty_replies(&mut self) -> Vec<u8> {
+        self.pump();
         let mut out = Vec::new();
-        for event in self.drain_events() {
+        self.pending.retain(|event| {
             if let Event::PtyWrite(text) = event {
                 out.extend_from_slice(text.as_bytes());
+                false
+            } else {
+                true
             }
-        }
+        });
         out
     }
 
@@ -109,7 +129,15 @@ impl Terminal {
         let grid = self.term.grid();
         let mut out = String::with_capacity(self.term.columns());
         for col in 0..self.term.columns() {
-            out.push(grid[Point::new(Line(line as i32), Column(col))].c);
+            let cell = &grid[Point::new(Line(line as i32), Column(col))];
+            // A wide glyph owns two cells; the spacer is padding, not a character.
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                continue;
+            }
+            out.push(cell.c);
         }
         out.trim_end().to_string()
     }
@@ -198,6 +226,21 @@ mod tests {
         t.feed(b"\x1b[6n");
         let reply = t.take_pty_replies();
         assert_eq!(String::from_utf8_lossy(&reply), "\x1b[1;1R");
+    }
+
+    #[test]
+    fn wide_chars_round_trip_without_spacers() {
+        let mut t = term();
+        t.feed("中文ab".as_bytes());
+        assert_eq!(t.line_text(0), "中文ab");
+    }
+
+    #[test]
+    fn drain_events_does_not_eat_pty_replies() {
+        let mut t = term();
+        t.feed(b"\x1b[6n");
+        let _ = t.drain_events();
+        assert_eq!(String::from_utf8_lossy(&t.take_pty_replies()), "\x1b[1;1R");
     }
 
     #[test]

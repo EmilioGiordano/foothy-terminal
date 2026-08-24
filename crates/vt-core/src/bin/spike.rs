@@ -34,10 +34,17 @@ fn main() -> anyhow::Result<()> {
             break;
         }
         if let Some(status) = pty.child_exited() {
-            let (rest, _) = pty.drain(100);
-            if !rest.is_empty() {
-                total_bytes += rest.len();
-                term.feed(&rest);
+            // The child exiting says nothing about the pipe being empty: bytes are
+            // still in flight in the reader thread. Draining once truncates output.
+            let quiet_until = Instant::now() + Duration::from_millis(50);
+            while Instant::now() < quiet_until {
+                let (rest, _) = pty.drain(100);
+                if rest.is_empty() {
+                    std::thread::sleep(Duration::from_millis(2));
+                } else {
+                    total_bytes += rest.len();
+                    term.feed(&rest);
+                }
             }
             eprintln!("(hijo terminó: {status:?})");
             break;
