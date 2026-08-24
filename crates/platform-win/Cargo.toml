@@ -3,6 +3,7 @@ name = "platform-win"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+default-run = "foot-win"
 
 [[bin]]
 name = "foot-win"

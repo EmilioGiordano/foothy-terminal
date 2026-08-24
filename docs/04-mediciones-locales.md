@@ -118,3 +118,40 @@ pedirle una ventana al servidor que ya tiene las fuentes cargadas.
 - Riesgo: *"should the server process crash, **all** windows will be gone."*
 
 No aplicado — pendiente de decisión.
+
+---
+
+## Mediciones de foot-win (nuestra terminal)
+
+Build `--release`, medido el 2026-08-24 en esta máquina (Windows 10 22H2).
+Un pane, sin splits. Contrastado con el presupuesto de `docs/02` §7.
+
+| Métrica | Objetivo §7 | Medido | |
+|---|---|---:|---|
+| Arranque en frío hasta ventana visible | < 150 ms | **63 ms** (mediana de 5; 62 ms mínimo) | ✅ |
+| RAM, 1 pane, scrollback 10k | < 40 MB | **19,1 MB** working set · 12,4 MB private | ✅ |
+| CPU en reposo | 0,0 % | **0,00 %** (0,0 ms de CPU en 3 s) | ✅ |
+| Binario en disco | — | **1,2 MB** | — |
+
+La primera corrida de las cinco dio 211 ms: es el coste de cargar el ejecutable
+en frío. A partir de la segunda se estabiliza en 62-64 ms.
+
+El 0,00 % de CPU en reposo no es casualidad: el hilo lector del PTY despierta el
+bucle de eventos con un `EventLoopProxy` en vez de que la UI haga polling. Es la
+regla 10 de `docs/02` §3, y ahora está medida.
+
+### El coste que no es nuestro
+
+```
+foot-win.exe     19,1 MB
+conhost          16,4 MB   ← ConPTY
+conhost           6,6 MB
+powershell.exe   75,7 MB   ← el shell
+```
+
+Casi 100 MB de los ~118 MB totales son PowerShell y ConPTY, que paga cualquier
+terminal de Windows por igual. Comparar los 191 MB de Warp con esto sería
+tramposo: ese número es tamaño en disco, no RAM.
+
+**Falta medir la métrica que define el proyecto**: que abrir un pane sea < 50 ms
+y constante con el número de panes. No se puede hasta que existan los splits.
