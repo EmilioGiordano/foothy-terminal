@@ -98,6 +98,12 @@ impl Renderer {
         (self.cell_w, self.cell_h)
     }
 
+    /// False when the font has no glyph for `c` and would draw `.notdef` (tofu).
+    /// Coverage is not a usable signal here: `.notdef` is itself an inked box.
+    pub fn has_glyph(&self, c: char) -> bool {
+        self.font.lookup_glyph_index(c) != 0
+    }
+
     pub fn grid_size(&self, width_px: usize, height_px: usize) -> TermSize {
         TermSize::new(
             (width_px / self.cell_w).max(1),
@@ -324,6 +330,23 @@ mod tests {
             !dirty,
             "sin contenido no deberia pintarse nada fuera del cursor"
         );
+    }
+
+    #[test]
+    fn font_covers_what_a_terminal_needs() {
+        let r = renderer();
+        for c in "Aa1@#áéñüÇ┌─┐│└┘├┼█▀▄".chars() {
+            assert!(r.has_glyph(c), "falta el glifo {c:?}");
+        }
+    }
+
+    #[test]
+    fn known_gap_no_font_fallback() {
+        // Cascadia Mono carries no CJK or emoji and there is no fallback font,
+        // so these draw as tofu. Delete this test when fallback lands.
+        let r = renderer();
+        assert!(!r.has_glyph('中'));
+        assert!(!r.has_glyph('😀'));
     }
 
     #[test]
