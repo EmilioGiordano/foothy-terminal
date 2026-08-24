@@ -7,8 +7,10 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use fontdue::{Font, FontSettings};
 use vt_core::{TermSize, Terminal};
 
-pub const DEFAULT_FG: u32 = 0x00cc_cccc;
-pub const DEFAULT_BG: u32 = 0x0012_1212;
+// foot's own defaults, taken from upstream/foot/config.c:33-68. The man page
+// still documents the old Solarized values; the code is what ships.
+pub const DEFAULT_FG: u32 = 0x00ff_ffff;
+pub const DEFAULT_BG: u32 = 0x0024_2424;
 
 fn rgb(r: u8, g: u8, b: u8) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | b as u32
@@ -16,27 +18,25 @@ fn rgb(r: u8, g: u8, b: u8) -> u32 {
 
 fn build_palette() -> [u32; 256] {
     let mut p = [0u32; 256];
-    const BASE: [(u8, u8, u8); 16] = [
-        (0x00, 0x00, 0x00),
-        (0xcd, 0x31, 0x31),
-        (0x0d, 0xbc, 0x79),
-        (0xe5, 0xe5, 0x10),
-        (0x24, 0x72, 0xc8),
-        (0xbc, 0x3f, 0xbc),
-        (0x11, 0xa8, 0xcd),
-        (0xe5, 0xe5, 0xe5),
-        (0x66, 0x66, 0x66),
-        (0xf1, 0x4c, 0x4c),
-        (0x23, 0xd1, 0x8b),
-        (0xf5, 0xf5, 0x43),
-        (0x3b, 0x8e, 0xea),
-        (0xd6, 0x70, 0xd6),
-        (0x29, 0xb8, 0xdb),
-        (0xff, 0xff, 0xff),
+    const BASE: [u32; 16] = [
+        0x0024_2424,
+        0x00f6_2b5a,
+        0x0047_b413,
+        0x00e3_c401,
+        0x0024_acd4,
+        0x00f2_affd,
+        0x0013_c299,
+        0x00e6_e6e6,
+        0x0061_6161,
+        0x00ff_4d51,
+        0x0035_d450,
+        0x00e9_e836,
+        0x005d_c5f8,
+        0x00fe_abf2,
+        0x0024_dfc4,
+        0x00ff_ffff,
     ];
-    for (i, (r, g, b)) in BASE.iter().enumerate() {
-        p[i] = rgb(*r, *g, *b);
-    }
+    p[..16].copy_from_slice(&BASE);
     const STEPS: [u8; 6] = [0, 95, 135, 175, 215, 255];
     for i in 0..216 {
         p[16 + i] = rgb(STEPS[i / 36], STEPS[(i / 6) % 6], STEPS[i % 6]);
@@ -64,6 +64,7 @@ pub struct Renderer {
     baseline: i32,
     palette: [u32; 256],
     glyphs: HashMap<char, Glyph>,
+    pad: usize,
 }
 
 impl Renderer {
@@ -91,11 +92,24 @@ impl Renderer {
             baseline: lm.ascent.ceil() as i32,
             palette: build_palette(),
             glyphs: HashMap::new(),
+            pad: 0,
         })
     }
 
     pub fn cell_size(&self) -> (usize, usize) {
         (self.cell_w, self.cell_h)
+    }
+
+    pub fn set_padding(&mut self, pad: usize) {
+        self.pad = pad;
+    }
+
+    /// Where the grid starts, so leftover pixels are split evenly instead of
+    /// piling up on one edge.
+    fn origin(&self, width: usize, height: usize, size: TermSize) -> (usize, usize) {
+        let x = width.saturating_sub(size.columns * self.cell_w) / 2;
+        let y = height.saturating_sub(size.screen_lines * self.cell_h) / 2;
+        (x, y)
     }
 
     /// False when the font has no glyph for `c` and would draw `.notdef` (tofu).
@@ -105,9 +119,11 @@ impl Renderer {
     }
 
     pub fn grid_size(&self, width_px: usize, height_px: usize) -> TermSize {
+        let usable_w = width_px.saturating_sub(2 * self.pad);
+        let usable_h = height_px.saturating_sub(2 * self.pad);
         TermSize::new(
-            (width_px / self.cell_w).max(1),
-            (height_px / self.cell_h).max(1),
+            (usable_w / self.cell_w).max(1),
+            (usable_h / self.cell_h).max(1),
         )
     }
 
@@ -155,13 +171,15 @@ impl Renderer {
             )
         };
 
+        let (ox, oy) = self.origin(width, height, TermSize::new(cols, rows));
+
         for row in 0..rows {
-            let y0 = row * self.cell_h;
+            let y0 = oy + row * self.cell_h;
             if y0 >= height {
                 break;
             }
             for col in 0..cols {
-                let x0 = col * self.cell_w;
+                let x0 = ox + col * self.cell_w;
                 if x0 >= width {
                     break;
                 }
@@ -356,11 +374,18 @@ mod tests {
     }
 
     #[test]
-    fn palette_has_known_anchors() {
+    fn palette_matches_foot_defaults() {
+        // upstream/foot/config.c:33-86
         let r = renderer();
-        assert_eq!(r.palette[0], 0x0000_0000);
+        assert_eq!(DEFAULT_FG, 0x00ff_ffff);
+        assert_eq!(DEFAULT_BG, 0x0024_2424);
+        assert_eq!(r.palette[0], 0x0024_2424, "negro de foot es el fondo");
+        assert_eq!(r.palette[1], 0x00f6_2b5a, "rojo de foot");
         assert_eq!(r.palette[15], 0x00ff_ffff);
-        assert_eq!(r.palette[231], 0x00ff_ffff);
+        // cubo 6x6x6 y rampa de grises, iguales a xterm y a foot
         assert_eq!(r.palette[16], 0x0000_0000);
+        assert_eq!(r.palette[231], 0x00ff_ffff);
+        assert_eq!(r.palette[232], 0x0008_0808);
+        assert_eq!(r.palette[255], 0x00ee_eeee);
     }
 }

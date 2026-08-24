@@ -14,6 +14,15 @@ use winit::window::{Window, WindowId};
 
 const FONT_PATH: &str = r"C:\Windows\Fonts\CascadiaMono.ttf";
 const FONT_PX: f32 = 16.0;
+// foot's own default is pad=0x0 (doc/foot.ini.5.scd).
+const PAD: usize = 0;
+
+fn env_or<T: std::str::FromStr>(key: &str, fallback: T) -> T {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(fallback)
+}
 const LINES_PER_NOTCH: i32 = 3;
 
 fn translate(key: &WKey, text: Option<&str>) -> Option<Key> {
@@ -65,8 +74,10 @@ struct App {
 
 impl App {
     fn new(proxy: EventLoopProxy<()>) -> anyhow::Result<Self> {
-        let font = std::fs::read(FONT_PATH)?;
-        let renderer = Renderer::new(&font, FONT_PX)?;
+        let font_path = std::env::var("FOOTWIN_FONT").unwrap_or_else(|_| FONT_PATH.into());
+        let font = std::fs::read(&font_path)?;
+        let mut renderer = Renderer::new(&font, env_or("FOOTWIN_FONT_PX", FONT_PX))?;
+        renderer.set_padding(env_or("FOOTWIN_PAD", PAD));
         let size = TermSize::new(100, 30);
         Ok(Self {
             proxy,
