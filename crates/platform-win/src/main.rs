@@ -444,6 +444,17 @@ impl ApplicationHandler for App {
                 }
             }
 
+            // foot binds BTN_MIDDLE to paste (doc/foot.ini.5.scd). There is no
+            // primary selection on Windows, so it pastes the clipboard.
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Middle,
+                ..
+            } => {
+                self.paste();
+                self.redraw_soon();
+            }
+
             WindowEvent::MouseWheel { delta, .. } => {
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => (y * LINES_PER_NOTCH as f32) as i32,
