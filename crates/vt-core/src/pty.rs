@@ -26,8 +26,20 @@ fn pty_size(size: TermSize) -> PtySize {
     }
 }
 
+pub type Waker = Box<dyn Fn() + Send + 'static>;
+
 impl Pty {
     pub fn spawn(cmd: CommandBuilder, size: TermSize) -> anyhow::Result<Self> {
+        Self::spawn_with_waker(cmd, size, None)
+    }
+
+    /// `waker` is called whenever bytes arrive, so the UI can stay event-driven
+    /// instead of polling (docs/02 §3 rule 10: idle must cost 0% CPU).
+    pub fn spawn_with_waker(
+        cmd: CommandBuilder,
+        size: TermSize,
+        waker: Option<Waker>,
+    ) -> anyhow::Result<Self> {
         let pair = native_pty_system().openpty(pty_size(size))?;
         let child = pair.slave.spawn_command(cmd)?;
 
@@ -44,11 +56,17 @@ impl Pty {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => {
                         let _ = tx.send(PtyEvent::Eof);
+                        if let Some(w) = &waker {
+                            w();
+                        }
                         break;
                     }
                     Ok(n) => {
                         if tx.send(PtyEvent::Output(buf[..n].to_vec())).is_err() {
                             break;
+                        }
+                        if let Some(w) = &waker {
+                            w();
                         }
                     }
                 }
