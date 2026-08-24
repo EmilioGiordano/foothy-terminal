@@ -14,3 +14,4 @@ anyhow = "1"
 fontdue = "0.9"
 winit = "0.30"
 softbuffer = "0.4"
+windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse"] }

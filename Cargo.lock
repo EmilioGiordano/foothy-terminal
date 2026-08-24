@@ -1230,6 +1230,7 @@ dependencies = [
  "render",
  "softbuffer",
  "vt-core",
+ "windows-sys 0.59.0",
  "winit",
 ]
 

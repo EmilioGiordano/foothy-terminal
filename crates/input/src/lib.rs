@@ -1,3 +1,5 @@
+pub mod win32;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Mods {
     pub ctrl: bool,
@@ -92,11 +94,11 @@ pub fn encode(key: &Key, mods: Mods) -> Option<Vec<u8>> {
         Key::Tab => vec![b'\t'],
         Key::Escape => vec![0x1b],
 
-        // Backspace sends DEL, and Ctrl+Backspace has no encoding of its own in the
-        // legacy protocol: it collides with Ctrl+H. 0x17 (Ctrl+W) is what makes
-        // PSReadLine run BackwardKillWord, which is the behaviour we want.
-        // See docs/05 §1.2 — the real fix is win32-input-mode.
-        Key::Backspace if mods.ctrl => vec![0x17],
+        // Ctrl+Backspace cannot be expressed in the legacy protocol. 0x17 (Ctrl+W)
+        // was tried and is worse than useless: PSReadLine has no Ctrl+W binding, so
+        // it inserts a literal ^W into the line. Falling back to DEL at least
+        // deletes one character. Word deletion needs win32-input-mode.
+        Key::Backspace if mods.ctrl => vec![0x7f],
         Key::Backspace if mods.alt => vec![0x1b, 0x7f],
         Key::Backspace => vec![0x7f],
 
@@ -162,16 +164,11 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_backspace_kills_word() {
-        assert_eq!(enc(Key::Backspace, Mods::CTRL), vec![0x17]);
-    }
-
-    #[test]
-    fn ctrl_backspace_differs_from_ctrl_h() {
-        assert_ne!(
-            enc(Key::Backspace, Mods::CTRL),
-            enc(Key::Char('h'), Mods::CTRL)
-        );
+    fn ctrl_backspace_falls_back_to_del_not_ctrl_w() {
+        // 0x17 made PSReadLine print a literal ^W. Never send it again.
+        let bytes = enc(Key::Backspace, Mods::CTRL);
+        assert_ne!(bytes, vec![0x17]);
+        assert_eq!(bytes, vec![0x7f]);
     }
 
     #[test]

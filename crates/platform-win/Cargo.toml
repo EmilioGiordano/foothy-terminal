@@ -16,3 +16,4 @@ portable-pty.workspace = true
 winit.workspace = true
 softbuffer.workspace = true
 anyhow.workspace = true
+windows-sys.workspace = true
