@@ -15,6 +15,7 @@ Elaborado el 2026-08-19, sobre el código fuente real de foot en el commit `8565
 | [docs/02-diseno-terminal-windows.md](docs/02-diseno-terminal-windows.md) | **El documento de diseño.** Arquitectura propuesta en 3 capas, reglas de rendimiento, elección de stack, plan por fases, decisiones de scope. |
 | [docs/03-referencias.md](docs/03-referencias.md) | **Repos y enlaces útiles.** foot, fcft, Alacritty, WezTerm, Ghostty/libghostty, Windows Terminal, ConPTY, especificaciones VT. |
 | [docs/04-mediciones-locales.md](docs/04-mediciones-locales.md) | **Números medidos en esta máquina**, más los benchmarks oficiales de foot. Incluye un hallazgo de configuración. |
+| [docs/05-comportamiento-y-accesibilidad.md](docs/05-comportamiento-y-accesibilidad.md) | **Qué hace la terminal y qué hace el shell.** Historial, copiar/pegar, encoding de teclado, y las decisiones de accesibilidad que no se pueden añadir después. |
 
 ## El repo de foot
 
