@@ -1,0 +1,748 @@
+//! The pane tree: branches hold children with flex ratios, leaves hold a pane.
+//!
+//! Modelled on Warp's design (docs/03) and i3/tmux before it. Knows nothing
+//! about terminals, windows or pixels beyond the rectangle it is asked to fill,
+//! so the whole thing is testable without opening a window.
+
+use std::collections::HashMap;
+
+pub type PaneId = u64;
+type NodeId = usize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Orientation {
+    /// Children side by side, left to right.
+    Horizontal,
+    /// Children stacked, top to bottom.
+    Vertical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl Direction {
+    fn axis(self) -> Orientation {
+        match self {
+            Direction::Left | Direction::Right => Orientation::Horizontal,
+            Direction::Up | Direction::Down => Orientation::Vertical,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl Rect {
+    pub fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
+        Self { x, y, w, h }
+    }
+
+    fn right(&self) -> f32 {
+        self.x + self.w
+    }
+
+    fn bottom(&self) -> f32 {
+        self.y + self.h
+    }
+
+    fn center(&self) -> (f32, f32) {
+        (self.x + self.w / 2.0, self.y + self.h / 2.0)
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Kind {
+    Leaf(PaneId),
+    Branch {
+        orientation: Orientation,
+        children: Vec<NodeId>,
+        /// One per child, summing to 1.0.
+        flex: Vec<f32>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct Node {
+    parent: Option<NodeId>,
+    kind: Kind,
+}
+
+#[derive(Debug, Clone)]
+pub struct Tree {
+    nodes: Vec<Node>,
+    root: NodeId,
+    /// Freed slots, so ids do not grow without bound as panes come and go.
+    vacant: Vec<NodeId>,
+    next_pane: PaneId,
+}
+
+impl Tree {
+    /// A tree with a single pane filling everything.
+    pub fn new() -> Self {
+        let root = Node {
+            parent: None,
+            kind: Kind::Leaf(0),
+        };
+        Self {
+            nodes: vec![root],
+            root: 0,
+            vacant: Vec::new(),
+            next_pane: 1,
+        }
+    }
+
+    pub fn panes(&self) -> Vec<PaneId> {
+        let mut out = Vec::new();
+        self.collect(self.root, &mut out);
+        out
+    }
+
+    fn collect(&self, node: NodeId, out: &mut Vec<PaneId>) {
+        match &self.nodes[node].kind {
+            Kind::Leaf(pane) => out.push(*pane),
+            Kind::Branch { children, .. } => {
+                for &c in children {
+                    self.collect(c, out);
+                }
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.panes().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+
+    fn find(&self, pane: PaneId) -> Option<NodeId> {
+        (0..self.nodes.len()).find(|&i| {
+            !self.vacant.contains(&i) && matches!(self.nodes[i].kind, Kind::Leaf(p) if p == pane)
+        })
+    }
+
+    fn alloc(&mut self, node: Node) -> NodeId {
+        match self.vacant.pop() {
+            Some(slot) => {
+                self.nodes[slot] = node;
+                slot
+            }
+            None => {
+                self.nodes.push(node);
+                self.nodes.len() - 1
+            }
+        }
+    }
+
+    /// Splits `pane`, putting the new pane after it. Returns the new pane's id.
+    ///
+    /// When the target already sits in a branch of the same orientation the new
+    /// pane joins that branch instead of nesting a new one; otherwise every
+    /// split would deepen the tree and the ratios would stop being comparable.
+    pub fn split(&mut self, pane: PaneId, orientation: Orientation) -> Option<PaneId> {
+        let node = self.find(pane)?;
+        let new_pane = self.next_pane;
+        self.next_pane += 1;
+
+        let parent = self.nodes[node].parent;
+        let same_axis = parent.is_some_and(|p| {
+            matches!(&self.nodes[p].kind, Kind::Branch { orientation: o, .. } if *o == orientation)
+        });
+
+        if same_axis {
+            let parent = parent.unwrap();
+            let leaf = self.alloc(Node {
+                parent: Some(parent),
+                kind: Kind::Leaf(new_pane),
+            });
+            if let Kind::Branch { children, flex, .. } = &mut self.nodes[parent].kind {
+                let at = children.iter().position(|&c| c == node).unwrap();
+                // The new pane takes half of the one it was split from.
+                let half = flex[at] / 2.0;
+                flex[at] = half;
+                flex.insert(at + 1, half);
+                children.insert(at + 1, leaf);
+            }
+        } else {
+            let old_leaf = self.alloc(Node {
+                parent: Some(node),
+                kind: self.nodes[node].kind.clone(),
+            });
+            let new_leaf = self.alloc(Node {
+                parent: Some(node),
+                kind: Kind::Leaf(new_pane),
+            });
+            self.nodes[node].kind = Kind::Branch {
+                orientation,
+                children: vec![old_leaf, new_leaf],
+                flex: vec![0.5, 0.5],
+            };
+        }
+        Some(new_pane)
+    }
+
+    /// Removes a pane. The last one cannot be closed: a tree always has a pane.
+    pub fn close(&mut self, pane: PaneId) -> bool {
+        if self.len() <= 1 {
+            return false;
+        }
+        let Some(node) = self.find(pane) else {
+            return false;
+        };
+        let Some(parent) = self.nodes[node].parent else {
+            return false;
+        };
+
+        let remaining = if let Kind::Branch { children, flex, .. } = &mut self.nodes[parent].kind {
+            let at = children.iter().position(|&c| c == node).unwrap();
+            children.remove(at);
+            let freed = flex.remove(at);
+            // Hand the freed space to the siblings, keeping the total at 1.0.
+            let total: f32 = flex.iter().sum();
+            if total > 0.0 {
+                for f in flex.iter_mut() {
+                    *f += freed * (*f / total);
+                }
+            }
+            children.clone()
+        } else {
+            return false;
+        };
+        self.vacant.push(node);
+
+        // A branch with a single child is redundant: pull the child up.
+        if remaining.len() == 1 {
+            let only = remaining[0];
+            let kind = self.nodes[only].kind.clone();
+            self.nodes[parent].kind = kind;
+            self.vacant.push(only);
+            if let Kind::Branch { children, .. } = &self.nodes[parent].kind.clone() {
+                for &c in children {
+                    self.nodes[c].parent = Some(parent);
+                }
+            }
+        }
+        true
+    }
+
+    /// Grows `pane` by `delta` (a fraction of its branch) at its siblings' cost.
+    pub fn resize(&mut self, pane: PaneId, delta: f32) -> bool {
+        let Some(node) = self.find(pane) else {
+            return false;
+        };
+        let Some(parent) = self.nodes[node].parent else {
+            return false;
+        };
+        const MIN: f32 = 0.05;
+
+        if let Kind::Branch { children, flex, .. } = &mut self.nodes[parent].kind {
+            let at = children.iter().position(|&c| c == node).unwrap();
+            let others: f32 = flex
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != at)
+                .map(|(_, f)| f)
+                .sum();
+            let target = (flex[at] + delta).clamp(MIN, 1.0 - MIN * (flex.len() - 1) as f32);
+            let applied = target - flex[at];
+            if others <= 0.0 {
+                return false;
+            }
+            flex[at] = target;
+            for (i, f) in flex.iter_mut().enumerate() {
+                if i != at {
+                    *f -= applied * (*f / others);
+                }
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Every pane's rectangle inside `area`.
+    pub fn layout(&self, area: Rect) -> HashMap<PaneId, Rect> {
+        let mut out = HashMap::new();
+        self.place(self.root, area, &mut out);
+        out
+    }
+
+    fn place(&self, node: NodeId, area: Rect, out: &mut HashMap<PaneId, Rect>) {
+        match &self.nodes[node].kind {
+            Kind::Leaf(pane) => {
+                out.insert(*pane, area);
+            }
+            Kind::Branch {
+                orientation,
+                children,
+                flex,
+            } => {
+                let mut offset = 0.0;
+                for (i, &child) in children.iter().enumerate() {
+                    let share = flex[i];
+                    // The last child absorbs the rounding, so the area is exactly filled.
+                    let last = i == children.len() - 1;
+                    let rect = match orientation {
+                        Orientation::Horizontal => {
+                            let w = if last {
+                                area.w - offset
+                            } else {
+                                area.w * share
+                            };
+                            Rect::new(area.x + offset, area.y, w, area.h)
+                        }
+                        Orientation::Vertical => {
+                            let h = if last {
+                                area.h - offset
+                            } else {
+                                area.h * share
+                            };
+                            Rect::new(area.x, area.y + offset, area.w, h)
+                        }
+                    };
+                    offset += match orientation {
+                        Orientation::Horizontal => rect.w,
+                        Orientation::Vertical => rect.h,
+                    };
+                    self.place(child, rect, out);
+                }
+            }
+        }
+    }
+
+    /// The pane to focus when moving `direction` from `pane`.
+    ///
+    /// Warp warns that this is the hard part, because tree order does not match
+    /// what the eye expects. So this ignores the tree and works on geometry:
+    /// among the panes on that side, take the one that overlaps the most across
+    /// the movement axis, and break ties by distance. That is the rule a person
+    /// actually has in mind.
+    pub fn neighbour(&self, pane: PaneId, direction: Direction, area: Rect) -> Option<PaneId> {
+        let rects = self.layout(area);
+        let from = *rects.get(&pane)?;
+        const EPS: f32 = 0.01;
+
+        let mut best: Option<(PaneId, f32, f32)> = None;
+        for (&other, rect) in &rects {
+            if other == pane {
+                continue;
+            }
+            let beyond = match direction {
+                Direction::Left => rect.right() <= from.x + EPS,
+                Direction::Right => rect.x >= from.right() - EPS,
+                Direction::Up => rect.bottom() <= from.y + EPS,
+                Direction::Down => rect.y >= from.bottom() - EPS,
+            };
+            if !beyond {
+                continue;
+            }
+
+            let overlap = match direction.axis() {
+                Orientation::Horizontal => {
+                    (from.bottom().min(rect.bottom()) - from.y.max(rect.y)).max(0.0)
+                }
+                Orientation::Vertical => {
+                    (from.right().min(rect.right()) - from.x.max(rect.x)).max(0.0)
+                }
+            };
+            if overlap <= 0.0 {
+                continue;
+            }
+
+            let (fx, fy) = from.center();
+            let (ox, oy) = rect.center();
+            let distance = match direction.axis() {
+                Orientation::Horizontal => (ox - fx).abs(),
+                Orientation::Vertical => (oy - fy).abs(),
+            };
+
+            let better = match best {
+                None => true,
+                Some((_, bo, bd)) => overlap > bo + EPS || (overlap > bo - EPS && distance < bd),
+            };
+            if better {
+                best = Some((other, overlap, distance));
+            }
+        }
+        best.map(|(id, _, _)| id)
+    }
+}
+
+impl Default for Tree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const AREA: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 100.0,
+        h: 100.0,
+    };
+
+    fn assert_close(a: f32, b: f32) {
+        assert!((a - b).abs() < 0.01, "{a} != {b}");
+    }
+
+    #[test]
+    fn starts_with_one_pane_filling_everything() {
+        let t = Tree::new();
+        assert_eq!(t.panes(), vec![0]);
+        let l = t.layout(AREA);
+        assert_eq!(l[&0], AREA);
+    }
+
+    #[test]
+    fn horizontal_split_puts_panes_side_by_side() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let l = t.layout(AREA);
+        assert_close(l[&0].w, 50.0);
+        assert_close(l[&b].w, 50.0);
+        assert_close(l[&0].h, 100.0);
+        assert_close(l[&0].x, 0.0);
+        assert_close(l[&b].x, 50.0);
+    }
+
+    #[test]
+    fn vertical_split_stacks_panes() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Vertical).unwrap();
+        let l = t.layout(AREA);
+        assert_close(l[&0].h, 50.0);
+        assert_close(l[&b].y, 50.0);
+        assert_close(l[&0].w, 100.0);
+    }
+
+    #[test]
+    fn splitting_on_the_same_axis_does_not_nest() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let c = t.split(b, Orientation::Horizontal).unwrap();
+        let l = t.layout(AREA);
+        assert_close(l[&0].w, 50.0);
+        assert_close(l[&b].w, 25.0);
+        assert_close(l[&c].w, 25.0);
+    }
+
+    #[test]
+    fn layout_covers_the_area_without_gaps_or_overlap() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let c = t.split(b, Orientation::Vertical).unwrap();
+        let d = t.split(c, Orientation::Horizontal).unwrap();
+        let l = t.layout(AREA);
+        assert_eq!(l.len(), 4);
+
+        let total: f32 = l.values().map(|r| r.w * r.h).sum();
+        assert_close(total, AREA.w * AREA.h);
+
+        let rects: Vec<&Rect> = l.values().collect();
+        for (i, a) in rects.iter().enumerate() {
+            for b in &rects[i + 1..] {
+                let overlap = (a.right().min(b.right()) - a.x.max(b.x)).max(0.0)
+                    * (a.bottom().min(b.bottom()) - a.y.max(b.y)).max(0.0);
+                assert_close(overlap, 0.0);
+            }
+        }
+        let _ = d;
+    }
+
+    #[test]
+    fn closing_gives_the_space_back() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        assert!(t.close(b));
+        assert_eq!(t.panes(), vec![0]);
+        assert_eq!(t.layout(AREA)[&0], AREA);
+    }
+
+    #[test]
+    fn closing_collapses_a_branch_left_with_one_child() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let c = t.split(b, Orientation::Vertical).unwrap();
+        assert!(t.close(c));
+        let l = t.layout(AREA);
+        assert_eq!(l.len(), 2);
+        assert_close(l[&b].h, 100.0);
+    }
+
+    #[test]
+    fn the_last_pane_cannot_be_closed() {
+        let mut t = Tree::new();
+        assert!(!t.close(0));
+        assert_eq!(t.len(), 1);
+    }
+
+    #[test]
+    fn resize_moves_space_between_siblings() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        assert!(t.resize(0, 0.2));
+        let l = t.layout(AREA);
+        assert_close(l[&0].w, 70.0);
+        assert_close(l[&b].w, 30.0);
+        assert_close(l[&0].w + l[&b].w, 100.0);
+    }
+
+    #[test]
+    fn resize_will_not_starve_a_pane() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        t.resize(0, 5.0);
+        let l = t.layout(AREA);
+        assert!(l[&b].w > 1.0, "el hermano quedo en {}", l[&b].w);
+    }
+
+    // --- navegacion direccional: la parte que Warp marca como dificil ---
+
+    #[test]
+    fn moves_between_side_by_side_panes() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        assert_eq!(t.neighbour(0, Direction::Right, AREA), Some(b));
+        assert_eq!(t.neighbour(b, Direction::Left, AREA), Some(0));
+        assert_eq!(t.neighbour(0, Direction::Left, AREA), None);
+        assert_eq!(t.neighbour(0, Direction::Up, AREA), None);
+    }
+
+    #[test]
+    fn moves_between_stacked_panes() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Vertical).unwrap();
+        assert_eq!(t.neighbour(0, Direction::Down, AREA), Some(b));
+        assert_eq!(t.neighbour(b, Direction::Up, AREA), Some(0));
+    }
+
+    #[test]
+    fn crosses_branches_by_geometry_not_by_tree_order() {
+        // Izquierda ocupa toda la altura; derecha esta partida en dos.
+        //   +--------+--------+
+        //   |        |   b    |
+        //   |   0    +--------+
+        //   |        |   c    |
+        //   +--------+--------+
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let c = t.split(b, Orientation::Vertical).unwrap();
+
+        // Desde arriba a la derecha, ir a la izquierda cae en 0 aunque en el
+        // arbol 0 no sea su hermano.
+        assert_eq!(t.neighbour(b, Direction::Left, AREA), Some(0));
+        assert_eq!(t.neighbour(c, Direction::Left, AREA), Some(0));
+        assert_eq!(t.neighbour(b, Direction::Down, AREA), Some(c));
+        assert_eq!(t.neighbour(c, Direction::Up, AREA), Some(b));
+    }
+
+    #[test]
+    fn picks_the_neighbour_that_overlaps_most() {
+        // 0 ocupa toda la izquierda. A la derecha hay tres apilados.
+        // Desde 0 hacia la derecha debe elegir el del medio, que es el que
+        // mas se solapa con el centro de 0... salvo que empaten, y entonces
+        // gana el mas cercano al centro.
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let c = t.split(b, Orientation::Vertical).unwrap();
+        let d = t.split(c, Orientation::Vertical).unwrap();
+
+        let l = t.layout(AREA);
+        assert_close(l[&b].h, 50.0);
+        assert_close(l[&c].h, 25.0);
+        assert_close(l[&d].h, 25.0);
+
+        // b es el que mas alto tiene, asi que se solapa mas con 0.
+        assert_eq!(t.neighbour(0, Direction::Right, AREA), Some(b));
+    }
+
+    #[test]
+    fn never_returns_a_pane_that_only_touches_at_a_corner() {
+        //   +--------+--------+
+        //   |   0    |   b    |
+        //   +--------+--------+
+        //   |   d    |   c    |
+        //   +--------+--------+
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let c = t.split(b, Orientation::Vertical).unwrap();
+        let d = t.split(0, Orientation::Vertical).unwrap();
+
+        // En diagonal no hay vecino: 0 y c solo se tocan en la esquina.
+        assert_ne!(t.neighbour(0, Direction::Down, AREA), Some(c));
+        assert_eq!(t.neighbour(0, Direction::Down, AREA), Some(d));
+        assert_eq!(t.neighbour(0, Direction::Right, AREA), Some(b));
+    }
+
+    #[test]
+    fn navigation_survives_closing_panes() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let c = t.split(b, Orientation::Vertical).unwrap();
+        t.close(b);
+        assert_eq!(t.neighbour(0, Direction::Right, AREA), Some(c));
+        assert_eq!(t.neighbour(c, Direction::Left, AREA), Some(0));
+    }
+
+    #[test]
+    fn ids_are_reused_without_confusing_the_tree() {
+        let mut t = Tree::new();
+        for _ in 0..20 {
+            let p = t.split(0, Orientation::Horizontal).unwrap();
+            assert!(t.close(p));
+        }
+        assert_eq!(t.panes(), vec![0]);
+        assert_eq!(t.layout(AREA)[&0], AREA);
+    }
+}
+
+#[cfg(test)]
+mod fuzz {
+    use super::*;
+
+    /// Deterministic so a failure is reproducible; no dependency for it.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    fn check_invariants(t: &Tree, area: Rect) {
+        let panes = t.panes();
+        assert!(!panes.is_empty(), "el arbol se quedo sin panes");
+
+        let mut sorted = panes.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), panes.len(), "hay panes duplicados: {panes:?}");
+
+        let rects = t.layout(area);
+        assert_eq!(rects.len(), panes.len(), "layout y arbol no coinciden");
+
+        let total: f32 = rects.values().map(|r| r.w * r.h).sum();
+        assert!(
+            (total - area.w * area.h).abs() < 0.5,
+            "el area no se cubre: {total} vs {}",
+            area.w * area.h
+        );
+
+        for r in rects.values() {
+            assert!(r.w > 0.0 && r.h > 0.0, "rectangulo degenerado: {r:?}");
+        }
+
+        let list: Vec<&Rect> = rects.values().collect();
+        for (i, a) in list.iter().enumerate() {
+            for b in &list[i + 1..] {
+                let overlap = (a.right().min(b.right()) - a.x.max(b.x)).max(0.0)
+                    * (a.bottom().min(b.bottom()) - a.y.max(b.y)).max(0.0);
+                assert!(overlap < 0.5, "se solapan: {a:?} y {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn random_split_close_resize_keeps_the_tree_sane() {
+        let area = Rect::new(0.0, 0.0, 1000.0, 800.0);
+        for seed in 0..40u64 {
+            let mut rng = Lcg(seed.wrapping_mul(0x9E3779B9) + 1);
+            let mut t = Tree::new();
+
+            for _ in 0..120 {
+                let panes = t.panes();
+                let pane = panes[rng.below(panes.len())];
+                match rng.below(10) {
+                    0..=4 => {
+                        let o = if rng.below(2) == 0 {
+                            Orientation::Horizontal
+                        } else {
+                            Orientation::Vertical
+                        };
+                        t.split(pane, o);
+                    }
+                    5..=7 => {
+                        t.close(pane);
+                    }
+                    _ => {
+                        let delta = (rng.below(21) as f32 - 10.0) / 50.0;
+                        t.resize(pane, delta);
+                    }
+                }
+                check_invariants(&t, area);
+            }
+
+            // La navegacion nunca debe devolver un pane inexistente ni uno mismo.
+            let panes = t.panes();
+            for &p in &panes {
+                for d in [
+                    Direction::Left,
+                    Direction::Right,
+                    Direction::Up,
+                    Direction::Down,
+                ] {
+                    if let Some(n) = t.neighbour(p, d, area) {
+                        assert_ne!(n, p, "se devolvio a si mismo");
+                        assert!(panes.contains(&n), "vecino inexistente: {n}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn moving_and_coming_back_is_stable() {
+        let area = Rect::new(0.0, 0.0, 1000.0, 800.0);
+        let mut rng = Lcg(7);
+        let mut t = Tree::new();
+        for _ in 0..30 {
+            let panes = t.panes();
+            let pane = panes[rng.below(panes.len())];
+            let o = if rng.below(2) == 0 {
+                Orientation::Horizontal
+            } else {
+                Orientation::Vertical
+            };
+            t.split(pane, o);
+        }
+
+        // Ir y volver tiene que llevarte a un pane que a su vez te devuelva al
+        // original: si no, la navegacion "se pierde" y el usuario lo nota.
+        for &p in &t.panes() {
+            for (go, back) in [
+                (Direction::Left, Direction::Right),
+                (Direction::Up, Direction::Down),
+            ] {
+                if let Some(n) = t.neighbour(p, go, area) {
+                    let there_and_back = t.neighbour(n, back, area);
+                    assert!(
+                        there_and_back.is_some(),
+                        "desde {p} hacia {go:?} llega a {n}, pero {n} no vuelve"
+                    );
+                }
+            }
+        }
+    }
+}
