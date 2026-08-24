@@ -58,3 +58,14 @@ pub fn confirm(hwnd: HWND, title: &str, body: &str) -> bool {
     };
     answer == IDYES
 }
+
+/// Half-period of the caret blink, as configured in Windows. `None` when the
+/// user turned blinking off in accessibility settings, which must be honoured
+/// (docs/05 §3.2 row 5: blinking is a photosensitivity and vestibular concern).
+pub fn caret_blink() -> Option<std::time::Duration> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime;
+    match unsafe { GetCaretBlinkTime() } {
+        0 | u32::MAX => None,
+        ms => Some(std::time::Duration::from_millis(ms as u64)),
+    }
+}

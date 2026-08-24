@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 use input::paste::{self, Risk};
 use input::{Key, Mods};
 use portable_pty::CommandBuilder;
-use render::Renderer;
+use render::{CursorLook, Renderer};
 use vt_core::pty::Pty;
-use vt_core::{Scroll, SelectionType, Side, TermSize, Terminal};
+use vt_core::{CursorShape, Scroll, SelectionType, Side, TermSize, Terminal};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
@@ -119,6 +119,10 @@ struct App {
     selecting: bool,
     last_click: Option<(Instant, usize, usize)>,
     click_streak: u8,
+    focused: bool,
+    blink: Option<Duration>,
+    blink_on: bool,
+    blink_since: Instant,
 }
 
 impl App {
@@ -135,7 +139,7 @@ impl App {
             surface: None,
             _context: None,
             renderer,
-            term: Terminal::new(size),
+            term: Terminal::with_cursor(size, CursorShape::Beam),
             pty: None,
             mods: Mods::default(),
             size,
@@ -145,6 +149,10 @@ impl App {
             selecting: false,
             last_click: None,
             click_streak: 0,
+            focused: true,
+            blink: None,
+            blink_on: true,
+            blink_since: Instant::now(),
         })
     }
 
@@ -218,6 +226,28 @@ impl App {
         self.term.scroll(Scroll::Bottom);
     }
 
+    fn cursor_look(&self) -> CursorLook {
+        if !self.focused {
+            return CursorLook::Hollow;
+        }
+        if !self.blink_on {
+            return CursorLook::Hidden;
+        }
+        match self.term.cursor_style().shape {
+            CursorShape::Block => CursorLook::Block,
+            CursorShape::Underline => CursorLook::Underline,
+            CursorShape::Beam => CursorLook::Beam,
+            CursorShape::HollowBlock => CursorLook::Hollow,
+            CursorShape::Hidden => CursorLook::Hidden,
+        }
+    }
+
+    /// Keeps the cursor solid while you are typing, like every text field.
+    fn restart_blink(&mut self) {
+        self.blink_on = true;
+        self.blink_since = Instant::now();
+    }
+
     fn redraw_soon(&mut self) {
         self.dirty = true;
         if let Some(w) = self.window.as_ref() {
@@ -238,6 +268,7 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        let look = self.cursor_look();
         let (Some(window), Some(surface)) = (self.window.as_ref(), self.surface.as_mut()) else {
             return;
         };
@@ -256,6 +287,7 @@ impl App {
             &mut buffer,
             phys.width as usize,
             phys.height as usize,
+            look,
         );
         let _ = buffer.present();
         self.dirty = false;
@@ -287,6 +319,20 @@ impl ApplicationHandler for App {
             let hwnd = self.hwnd as _;
             chrome::set_dark_titlebar(hwnd, true);
             chrome::set_opacity(hwnd, env_or("FOOTWIN_ALPHA", ALPHA));
+        }
+
+        // Sin variable, manda el sistema (que ya respeta accesibilidad).
+        // FOOTWIN_BLINK=0 lo apaga; cualquier otro numero es el periodo en ms.
+        self.blink = match std::env::var("FOOTWIN_BLINK")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            None => chrome::caret_blink(),
+            Some(0) => None,
+            Some(ms) => Some(Duration::from_millis(ms)),
+        };
+        if self.blink.is_none() {
+            self.blink_on = true;
         }
 
         let phys = window.inner_size();
@@ -325,6 +371,12 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                self.restart_blink();
+                self.redraw_soon();
+            }
 
             WindowEvent::Resized(size) => {
                 self.resize_grid(size.width, size.height);
@@ -394,6 +446,7 @@ impl ApplicationHandler for App {
                     // Typing always returns to the live view, like every terminal.
                     self.term.scroll(Scroll::Bottom);
                     self.term.clear_selection();
+                    self.restart_blink();
                     self.send(&bytes);
                 }
             }
@@ -480,6 +533,26 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.pty.is_none() {
             event_loop.exit();
+            return;
+        }
+
+        // Without a blinking cursor nothing is scheduled and the loop sleeps
+        // until the next real event, which keeps idle CPU at zero.
+        let Some(period) = self.blink.filter(|_| self.focused) else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        };
+
+        let elapsed = self.blink_since.elapsed();
+        if elapsed >= period {
+            self.blink_on = !self.blink_on;
+            self.blink_since = Instant::now();
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+            event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + period));
+        } else {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(self.blink_since + period));
         }
     }
 }

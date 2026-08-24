@@ -14,6 +14,7 @@ pub mod pty;
 pub use alacritty_terminal::grid::Scroll;
 pub use alacritty_terminal::index::Side;
 pub use alacritty_terminal::selection::{SelectionRange, SelectionType};
+pub use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle};
 
 #[derive(Clone)]
 pub struct EventSink(Sender<Event>);
@@ -63,6 +64,24 @@ pub struct Terminal {
 impl Terminal {
     pub fn new(size: TermSize) -> Self {
         Self::with_config(size, Config::default())
+    }
+
+    /// `shape` is what the terminal shows until a program asks for something
+    /// else with DECSCUSR.
+    pub fn with_cursor(size: TermSize, shape: CursorShape) -> Self {
+        let config = Config {
+            default_cursor_style: CursorStyle {
+                shape,
+                blinking: false,
+            },
+            ..Config::default()
+        };
+        Self::with_config(size, config)
+    }
+
+    /// What the running program wants the cursor to look like.
+    pub fn cursor_style(&self) -> CursorStyle {
+        self.term.cursor_style()
     }
 
     pub fn with_config(size: TermSize, config: Config) -> Self {

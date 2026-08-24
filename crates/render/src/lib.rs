@@ -7,6 +7,17 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use fontdue::{Font, FontSettings};
 use vt_core::{TermSize, Terminal};
 
+/// How the cursor is painted this frame. The caller decides, because focus and
+/// blink phase live in the platform layer, not here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorLook {
+    Block,
+    Beam,
+    Underline,
+    Hollow,
+    Hidden,
+}
+
 // foot's own defaults, taken from upstream/foot/config.c:33-68. The man page
 // still documents the old Solarized values; the code is what ships.
 pub const DEFAULT_FG: u32 = 0x00ff_ffff;
@@ -184,7 +195,14 @@ impl Renderer {
         }
     }
 
-    pub fn draw(&mut self, term: &Terminal, buf: &mut [u32], width: usize, height: usize) {
+    pub fn draw(
+        &mut self,
+        term: &Terminal,
+        buf: &mut [u32],
+        width: usize,
+        height: usize,
+        cursor_look: CursorLook,
+    ) {
         buf.fill(self.bg);
 
         let offset = term.display_offset() as i32;
@@ -240,7 +258,8 @@ impl Renderer {
                     )
                 };
 
-                if term.is_selected(row, col) || cursor == Some((row, col)) {
+                let on_cursor = cursor == Some((row, col));
+                if term.is_selected(row, col) || (on_cursor && cursor_look == CursorLook::Block) {
                     std::mem::swap(&mut fg, &mut bg);
                 }
 
@@ -256,10 +275,64 @@ impl Renderer {
                     bg,
                 );
 
-                if skip || ch == ' ' || ch == '\0' {
-                    continue;
+                if !(skip || ch == ' ' || ch == '\0') {
+                    self.blit(buf, width, height, x0, y0, ch, fg, bg);
                 }
-                self.blit(buf, width, height, x0, y0, ch, fg, bg);
+
+                if on_cursor {
+                    self.draw_cursor(buf, width, height, x0, y0, cursor_look, fg);
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_cursor(
+        &self,
+        buf: &mut [u32],
+        width: usize,
+        height: usize,
+        x0: usize,
+        y0: usize,
+        look: CursorLook,
+        color: u32,
+    ) {
+        // Thin enough to sit beside the glyph rather than cover it, but never
+        // less than one pixel or it disappears at small sizes.
+        let thickness = (self.cell_w / 8).clamp(1, 2);
+        match look {
+            CursorLook::Hidden | CursorLook::Block => {}
+            CursorLook::Beam => {
+                fill_rect(buf, width, height, x0, y0, thickness, self.cell_h, color);
+            }
+            CursorLook::Underline => {
+                let y = y0 + self.cell_h.saturating_sub(thickness);
+                fill_rect(buf, width, height, x0, y, self.cell_w, thickness, color);
+            }
+            CursorLook::Hollow => {
+                let (w, h) = (self.cell_w, self.cell_h);
+                fill_rect(buf, width, height, x0, y0, w, 1, color);
+                fill_rect(
+                    buf,
+                    width,
+                    height,
+                    x0,
+                    y0 + h.saturating_sub(1),
+                    w,
+                    1,
+                    color,
+                );
+                fill_rect(buf, width, height, x0, y0, 1, h, color);
+                fill_rect(
+                    buf,
+                    width,
+                    height,
+                    x0 + w.saturating_sub(1),
+                    y0,
+                    1,
+                    h,
+                    color,
+                );
             }
         }
     }
@@ -362,7 +435,7 @@ mod tests {
         term.feed(b"X");
 
         let mut buf = vec![0u32; w * h];
-        r.draw(&term, &mut buf, w, h);
+        r.draw(&term, &mut buf, w, h, CursorLook::Beam);
 
         let first_cell_lit = (0..ch)
             .flat_map(|y| (0..cw).map(move |x| (x, y)))
@@ -377,7 +450,7 @@ mod tests {
         let (w, h) = (cw * 4, ch * 2);
         let term = Terminal::new(TermSize::new(4, 2));
         let mut buf = vec![0u32; w * h];
-        r.draw(&term, &mut buf, w, h);
+        r.draw(&term, &mut buf, w, h, CursorLook::Beam);
 
         // El cursor invierte su celda, asi que solo se mira fuera de ella.
         let dirty = (ch..h).any(|y| (0..w).any(|x| buf[y * w + x] != DEFAULT_BG));
@@ -402,6 +475,57 @@ mod tests {
         let r = renderer();
         assert!(!r.has_glyph('中'));
         assert!(!r.has_glyph('😀'));
+    }
+
+    fn painted_columns(look: CursorLook) -> usize {
+        let mut r = renderer();
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        let term = Terminal::new(TermSize::new(4, 2));
+        let mut buf = vec![0u32; w * h];
+        r.draw(&term, &mut buf, w, h, look);
+        // Columnas de la celda 0 con algun pixel distinto del fondo.
+        (0..cw)
+            .filter(|&x| (0..ch).any(|y| buf[y * w + x] != DEFAULT_BG))
+            .count()
+    }
+
+    #[test]
+    fn beam_cursor_is_a_thin_bar_not_a_block() {
+        let (cw, _) = renderer().cell_size();
+        let beam = painted_columns(CursorLook::Beam);
+        assert!(beam >= 1, "la barra no se pinto");
+        assert!(
+            beam <= 2,
+            "la barra ocupa {beam} columnas, deberia ser fina"
+        );
+        assert!(beam < cw, "la barra cubre toda la celda");
+    }
+
+    #[test]
+    fn block_cursor_fills_the_cell() {
+        let (cw, _) = renderer().cell_size();
+        assert_eq!(painted_columns(CursorLook::Block), cw);
+    }
+
+    #[test]
+    fn hidden_cursor_paints_nothing() {
+        assert_eq!(painted_columns(CursorLook::Hidden), 0);
+    }
+
+    #[test]
+    fn underline_cursor_spans_the_width_but_not_the_height() {
+        let mut r = renderer();
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        let term = Terminal::new(TermSize::new(4, 2));
+        let mut buf = vec![0u32; w * h];
+        r.draw(&term, &mut buf, w, h, CursorLook::Underline);
+        let rows = (0..ch)
+            .filter(|&y| (0..cw).any(|x| buf[y * w + x] != DEFAULT_BG))
+            .count();
+        assert!(rows <= 2, "el subrayado ocupa {rows} filas");
+        assert_eq!(painted_columns(CursorLook::Underline), cw);
     }
 
     #[test]
