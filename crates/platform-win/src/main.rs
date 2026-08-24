@@ -1,3 +1,5 @@
+mod chrome;
+
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
@@ -10,12 +12,23 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WKey, NamedKey};
+use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{Window, WindowId};
 
 const FONT_PATH: &str = r"C:\Windows\Fonts\CascadiaMono.ttf";
 const FONT_PX: f32 = 16.0;
 // foot's own default is pad=0x0 (doc/foot.ini.5.scd).
 const PAD: usize = 0;
+const BG: u32 = 0x0016_2a33;
+const FG: u32 = 0x00cf_ecf7;
+const ALPHA: u8 = 235;
+
+fn env_hex(key: &str, fallback: u32) -> u32 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| u32::from_str_radix(v.trim_start_matches('#'), 16).ok())
+        .unwrap_or(fallback)
+}
 
 fn env_or<T: std::str::FromStr>(key: &str, fallback: T) -> T {
     std::env::var(key)
@@ -78,6 +91,7 @@ impl App {
         let font = std::fs::read(&font_path)?;
         let mut renderer = Renderer::new(&font, env_or("FOOTWIN_FONT_PX", FONT_PX))?;
         renderer.set_padding(env_or("FOOTWIN_PAD", PAD));
+        renderer.set_colors(env_hex("FOOTWIN_FG", FG), env_hex("FOOTWIN_BG", BG));
         let size = TermSize::new(100, 30);
         Ok(Self {
             proxy,
@@ -169,6 +183,14 @@ impl ApplicationHandler for App {
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
         let surface =
             softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface");
+
+        if let Ok(handle) = window.window_handle()
+            && let RawWindowHandle::Win32(w) = handle.as_raw()
+        {
+            let hwnd = w.hwnd.get() as _;
+            chrome::set_dark_titlebar(hwnd, true);
+            chrome::set_opacity(hwnd, env_or("FOOTWIN_ALPHA", ALPHA));
+        }
 
         let phys = window.inner_size();
         self.window = Some(window);

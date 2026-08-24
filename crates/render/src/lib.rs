@@ -65,6 +65,8 @@ pub struct Renderer {
     palette: [u32; 256],
     glyphs: HashMap<char, Glyph>,
     pad: usize,
+    fg: u32,
+    bg: u32,
 }
 
 impl Renderer {
@@ -93,6 +95,8 @@ impl Renderer {
             palette: build_palette(),
             glyphs: HashMap::new(),
             pad: 0,
+            fg: DEFAULT_FG,
+            bg: DEFAULT_BG,
         })
     }
 
@@ -102,6 +106,15 @@ impl Renderer {
 
     pub fn set_padding(&mut self, pad: usize) {
         self.pad = pad;
+    }
+
+    pub fn set_colors(&mut self, fg: u32, bg: u32) {
+        self.fg = fg;
+        self.bg = bg;
+    }
+
+    pub fn background(&self) -> u32 {
+        self.bg
     }
 
     /// Where the grid starts, so leftover pixels are split evenly instead of
@@ -144,8 +157,8 @@ impl Renderer {
         match color {
             Color::Spec(Rgb { r, g, b }) => rgb(r, g, b),
             Color::Indexed(i) => self.palette[i as usize],
-            Color::Named(NamedColor::Foreground) => DEFAULT_FG,
-            Color::Named(NamedColor::Background) => DEFAULT_BG,
+            Color::Named(NamedColor::Foreground) => self.fg,
+            Color::Named(NamedColor::Background) => self.bg,
             Color::Named(named) => {
                 let i = named as usize;
                 if i < 256 { self.palette[i] } else { default }
@@ -154,7 +167,7 @@ impl Renderer {
     }
 
     pub fn draw(&mut self, term: &Terminal, buf: &mut [u32], width: usize, height: usize) {
-        buf.fill(DEFAULT_BG);
+        buf.fill(self.bg);
 
         let offset = term.display_offset() as i32;
         let (cols, rows, cursor) = {
@@ -190,13 +203,13 @@ impl Renderer {
                     let inverse = cell.flags.contains(Flags::INVERSE);
                     let (f, b) = if inverse {
                         (
-                            self.resolve(cell.bg, DEFAULT_BG),
-                            self.resolve(cell.fg, DEFAULT_FG),
+                            self.resolve(cell.bg, self.bg),
+                            self.resolve(cell.fg, self.fg),
                         )
                     } else {
                         (
-                            self.resolve(cell.fg, DEFAULT_FG),
-                            self.resolve(cell.bg, DEFAULT_BG),
+                            self.resolve(cell.fg, self.fg),
+                            self.resolve(cell.bg, self.bg),
                         )
                     };
                     (
