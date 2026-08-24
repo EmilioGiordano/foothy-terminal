@@ -32,3 +32,29 @@ pub fn set_opacity(hwnd: HWND, alpha: u8) {
         SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA);
     }
 }
+
+/// Native modal confirmation. Returns true when the user chose to continue.
+pub fn confirm(hwnd: HWND, title: &str, body: &str) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO, MessageBoxW,
+    };
+
+    let wide = |s: &str| {
+        std::os::windows::ffi::OsStrExt::encode_wide(std::ffi::OsStr::new(s))
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>()
+    };
+    let body = wide(body);
+    let title = wide(title);
+
+    // MB_DEFBUTTON2 puts the focus on "No": a stray Enter must not paste.
+    let answer = unsafe {
+        MessageBoxW(
+            hwnd,
+            body.as_ptr(),
+            title.as_ptr(),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+        )
+    };
+    answer == IDYES
+}

@@ -5,6 +5,7 @@ use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use input::paste::{self, Risk};
 use input::{Key, Mods};
 use portable_pty::CommandBuilder;
 use render::Renderer;
@@ -39,6 +40,34 @@ fn env_or<T: std::str::FromStr>(key: &str, fallback: T) -> T {
         .unwrap_or(fallback)
 }
 const LINES_PER_NOTCH: i32 = 3;
+
+fn preview(text: &str) -> String {
+    let first = text.lines().next().unwrap_or("").trim();
+    let shown: String = first.chars().take(70).collect();
+    if first.chars().count() > 70 {
+        format!("{shown}…")
+    } else {
+        shown
+    }
+}
+
+fn warning_for(risk: Risk, text: &str) -> Option<String> {
+    match risk {
+        Risk::Safe => None,
+        Risk::WouldExecute { lines } => Some(format!(
+            "Vas a pegar {lines} líneas.\n\n\
+             El programa activo no pidió bracketed paste, así que cada salto de línea \
+             se ejecuta igual que si apretaras Enter.\n\n\
+             Empieza con:\n    {}\n\n¿Pegar de todos modos?",
+            preview(text)
+        )),
+        Risk::Large { bytes } => Some(format!(
+            "Vas a pegar {bytes} bytes en una sola línea.\n\n\
+             Empieza con:\n    {}\n\n¿Pegar de todos modos?",
+            preview(text)
+        )),
+    }
+}
 
 fn translate(key: &WKey, text: Option<&str>) -> Option<Key> {
     Some(match key {
@@ -85,6 +114,7 @@ struct App {
     mods: Mods,
     size: TermSize,
     dirty: bool,
+    hwnd: isize,
     mouse: (f64, f64),
     selecting: bool,
     last_click: Option<(Instant, usize, usize)>,
@@ -110,6 +140,7 @@ impl App {
             mods: Mods::default(),
             size,
             dirty: true,
+            hwnd: 0,
             mouse: (0.0, 0.0),
             selecting: false,
             last_click: None,
@@ -166,12 +197,21 @@ impl App {
         let Some(text) = clipboard::get_text() else {
             return;
         };
-        // Normalise to CR: that is what Enter sends, and what shells expect.
-        let text = text.replace("\r\n", "\r").replace('\n', "\r");
-        if self.term.bracketed_paste() {
-            self.send(b"\x1b[200~");
-            self.send(text.as_bytes());
-            self.send(b"\x1b[201~");
+        if text.is_empty() {
+            return;
+        }
+
+        let bracketed = self.term.bracketed_paste();
+        if env_or("FOOTWIN_PASTE_WARN", 1) != 0
+            && let Some(message) = warning_for(paste::assess(&text, bracketed), &text)
+            && !chrome::confirm(self.hwnd as _, "Confirmar pegado", &message)
+        {
+            return;
+        }
+
+        let text = paste::normalize(&text);
+        if bracketed {
+            self.send(&paste::bracket(&text));
         } else {
             self.send(text.as_bytes());
         }
@@ -243,7 +283,8 @@ impl ApplicationHandler for App {
         if let Ok(handle) = window.window_handle()
             && let RawWindowHandle::Win32(w) = handle.as_raw()
         {
-            let hwnd = w.hwnd.get() as _;
+            self.hwnd = w.hwnd.get();
+            let hwnd = self.hwnd as _;
             chrome::set_dark_titlebar(hwnd, true);
             chrome::set_opacity(hwnd, env_or("FOOTWIN_ALPHA", ALPHA));
         }
@@ -438,4 +479,37 @@ fn main() -> anyhow::Result<()> {
     let mut app = App::new(event_loop.create_proxy())?;
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_paste_asks_nothing() {
+        assert_eq!(warning_for(Risk::Safe, "cargo build"), None);
+    }
+
+    #[test]
+    fn multiline_warning_names_the_line_count_and_shows_the_start() {
+        let text = "rm -rf /tmp/basura\ncargo build\n";
+        let msg = warning_for(Risk::WouldExecute { lines: 3 }, text).unwrap();
+        assert!(msg.contains("3 líneas"), "{msg}");
+        assert!(msg.contains("rm -rf /tmp/basura"), "{msg}");
+    }
+
+    #[test]
+    fn large_warning_names_the_size() {
+        let msg = warning_for(Risk::Large { bytes: 9000 }, "x").unwrap();
+        assert!(msg.contains("9000 bytes"), "{msg}");
+    }
+
+    #[test]
+    fn preview_is_first_line_only_and_bounded() {
+        assert_eq!(preview("  hola  \nmundo"), "hola");
+        let long = "a".repeat(200);
+        let shown = preview(&long);
+        assert!(shown.chars().count() <= 71, "{}", shown.chars().count());
+        assert!(shown.ends_with('…'));
+    }
 }

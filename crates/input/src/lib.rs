@@ -1,3 +1,4 @@
+pub mod paste;
 pub mod win32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
