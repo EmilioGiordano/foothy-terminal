@@ -5,15 +5,16 @@ use input::{Key, Mods};
 use portable_pty::CommandBuilder;
 use render::Renderer;
 use vt_core::pty::Pty;
-use vt_core::{TermSize, Terminal};
+use vt_core::{Scroll, TermSize, Terminal};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WKey, NamedKey};
 use winit::window::{Window, WindowId};
 
 const FONT_PATH: &str = r"C:\Windows\Fonts\CascadiaMono.ttf";
 const FONT_PX: f32 = 16.0;
+const LINES_PER_NOTCH: i32 = 3;
 
 fn translate(key: &WKey, text: Option<&str>) -> Option<Key> {
     Some(match key {
@@ -215,11 +216,48 @@ impl ApplicationHandler for App {
                 if event.state != ElementState::Pressed {
                     return;
                 }
+                // Shift+PgUp/PgDn navigate the scrollback instead of reaching the shell.
+                if self.mods.shift {
+                    let page = match &event.logical_key {
+                        WKey::Named(NamedKey::PageUp) => Some(Scroll::PageUp),
+                        WKey::Named(NamedKey::PageDown) => Some(Scroll::PageDown),
+                        WKey::Named(NamedKey::Home) => Some(Scroll::Top),
+                        WKey::Named(NamedKey::End) => Some(Scroll::Bottom),
+                        _ => None,
+                    };
+                    if let Some(scroll) = page {
+                        self.term.scroll(scroll);
+                        self.dirty = true;
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                }
+
                 let text = event.text.as_ref().map(|s| s.as_str());
                 if let Some(key) = translate(&event.logical_key, text)
                     && let Some(bytes) = input::encode(&key, self.mods)
                 {
+                    // Typing always returns to the live view, like every terminal.
+                    self.term.scroll(Scroll::Bottom);
                     self.send(&bytes);
+                }
+            }
+
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => (y * LINES_PER_NOTCH as f32) as i32,
+                    MouseScrollDelta::PixelDelta(p) => {
+                        (p.y / self.renderer.cell_size().1 as f64) as i32
+                    }
+                };
+                if lines != 0 {
+                    self.term.scroll(Scroll::Delta(lines));
+                    self.dirty = true;
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
                 }
             }
 

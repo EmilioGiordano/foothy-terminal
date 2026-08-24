@@ -10,6 +10,8 @@ use alacritty_terminal::vte::ansi::Processor;
 
 pub mod pty;
 
+pub use alacritty_terminal::grid::Scroll;
+
 #[derive(Clone)]
 pub struct EventSink(Sender<Event>);
 
@@ -116,6 +118,15 @@ impl Terminal {
         self.term.resize(size);
     }
 
+    pub fn scroll(&mut self, scroll: Scroll) {
+        self.term.scroll_display(scroll);
+    }
+
+    /// How many lines above the live screen the viewport is parked at.
+    pub fn display_offset(&self) -> usize {
+        self.term.grid().display_offset()
+    }
+
     pub fn size(&self) -> TermSize {
         TermSize::new(self.term.columns(), self.term.screen_lines())
     }
@@ -125,11 +136,13 @@ impl Terminal {
         (p.line.0.max(0) as usize, p.column.0)
     }
 
+    /// `line` is relative to the viewport, so it follows the scrollback position.
     pub fn line_text(&self, line: usize) -> String {
         let grid = self.term.grid();
+        let row = Line(line as i32 - grid.display_offset() as i32);
         let mut out = String::with_capacity(self.term.columns());
         for col in 0..self.term.columns() {
-            let cell = &grid[Point::new(Line(line as i32), Column(col))];
+            let cell = &grid[Point::new(row, Column(col))];
             // A wide glyph owns two cells; the spacer is padding, not a character.
             if cell
                 .flags
@@ -241,6 +254,39 @@ mod tests {
         t.feed(b"\x1b[6n");
         let _ = t.drain_events();
         assert_eq!(String::from_utf8_lossy(&t.take_pty_replies()), "\x1b[1;1R");
+    }
+
+    #[test]
+    fn scrolling_up_reveals_scrollback() {
+        let mut t = Terminal::new(TermSize::new(20, 3));
+        for i in 1..=10 {
+            t.feed(format!("linea {i}\r\n").as_bytes());
+        }
+        assert_eq!(t.display_offset(), 0);
+        assert_eq!(t.line_text(0), "linea 9");
+
+        t.scroll(Scroll::Delta(3));
+        assert_eq!(t.display_offset(), 3);
+        assert_eq!(t.line_text(0), "linea 6");
+
+        t.scroll(Scroll::Bottom);
+        assert_eq!(t.display_offset(), 0);
+        assert_eq!(t.line_text(0), "linea 9");
+    }
+
+    #[test]
+    fn scroll_is_clamped_at_both_ends() {
+        let mut t = Terminal::new(TermSize::new(20, 3));
+        for i in 1..=10 {
+            t.feed(format!("linea {i}\r\n").as_bytes());
+        }
+        t.scroll(Scroll::Delta(9999));
+        let top = t.display_offset();
+        t.scroll(Scroll::Delta(1));
+        assert_eq!(t.display_offset(), top, "no deberia pasarse del inicio");
+
+        t.scroll(Scroll::Delta(-9999));
+        assert_eq!(t.display_offset(), 0);
     }
 
     #[test]

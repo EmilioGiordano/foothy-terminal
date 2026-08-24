@@ -140,13 +140,18 @@ impl Renderer {
     pub fn draw(&mut self, term: &Terminal, buf: &mut [u32], width: usize, height: usize) {
         buf.fill(DEFAULT_BG);
 
+        let offset = term.display_offset() as i32;
         let (cols, rows, cursor) = {
             let t = term.term();
             let p = t.grid().cursor.point;
+            // The cursor lives in buffer coordinates; scrolling back can push it
+            // off screen, and then it must not be drawn at all.
+            let cursor_row = p.line.0 + offset;
+            let visible = (0..t.screen_lines() as i32).contains(&cursor_row);
             (
                 t.columns(),
                 t.screen_lines(),
-                (p.line.0.max(0) as usize, p.column.0),
+                visible.then_some((cursor_row as usize, p.column.0)),
             )
         };
 
@@ -162,7 +167,8 @@ impl Renderer {
                 }
 
                 let (ch, mut fg, mut bg, wide, skip) = {
-                    let cell = &term.term().grid()[Point::new(Line(row as i32), Column(col))];
+                    let cell =
+                        &term.term().grid()[Point::new(Line(row as i32 - offset), Column(col))];
                     let inverse = cell.flags.contains(Flags::INVERSE);
                     let (f, b) = if inverse {
                         (
@@ -185,7 +191,7 @@ impl Renderer {
                     )
                 };
 
-                if (row, col) == cursor {
+                if cursor == Some((row, col)) {
                     std::mem::swap(&mut fg, &mut bg);
                 }
 
