@@ -4,6 +4,7 @@ use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::selection::Selection;
 use alacritty_terminal::term::Config;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::Processor;
@@ -11,6 +12,8 @@ use alacritty_terminal::vte::ansi::Processor;
 pub mod pty;
 
 pub use alacritty_terminal::grid::Scroll;
+pub use alacritty_terminal::index::Side;
+pub use alacritty_terminal::selection::{SelectionRange, SelectionType};
 
 #[derive(Clone)]
 pub struct EventSink(Sender<Event>);
@@ -168,6 +171,66 @@ impl Terminal {
     pub fn term(&self) -> &Term<EventSink> {
         &self.term
     }
+
+    /// Viewport row + column to the buffer coordinates the grid uses.
+    fn point_at(&self, row: usize, col: usize) -> Point {
+        Point::new(
+            Line(row as i32 - self.display_offset() as i32),
+            Column(col.min(self.term.columns().saturating_sub(1))),
+        )
+    }
+
+    pub fn start_selection(&mut self, row: usize, col: usize, side: Side, ty: SelectionType) {
+        let point = self.point_at(row, col);
+        self.term.selection = Some(Selection::new(ty, point, side));
+    }
+
+    pub fn update_selection(&mut self, row: usize, col: usize, side: Side) {
+        let point = self.point_at(row, col);
+        if let Some(selection) = self.term.selection.as_mut() {
+            selection.update(point, side);
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.term.selection = None;
+    }
+
+    pub fn selection_range(&self) -> Option<SelectionRange> {
+        self.term.selection.as_ref()?.to_range(&self.term)
+    }
+
+    /// Whether the running program asked for bracketed paste, which is how it
+    /// tells pasted text apart from typed text.
+    pub fn bracketed_paste(&self) -> bool {
+        self.term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.selection_range().is_some()
+    }
+
+    pub fn selection_text(&self) -> Option<String> {
+        self.term.selection_to_string().filter(|s| !s.is_empty())
+    }
+
+    /// Whether a viewport cell falls inside the current selection.
+    pub fn is_selected(&self, row: usize, col: usize) -> bool {
+        let Some(range) = self.selection_range() else {
+            return false;
+        };
+        let point = self.point_at(row, col);
+        if range.is_block {
+            point.line >= range.start.line
+                && point.line <= range.end.line
+                && point.column >= range.start.column
+                && point.column <= range.end.column
+        } else {
+            point >= range.start && point <= range.end
+        }
+    }
 }
 
 #[cfg(test)]
@@ -287,6 +350,63 @@ mod tests {
 
         t.scroll(Scroll::Delta(-9999));
         assert_eq!(t.display_offset(), 0);
+    }
+
+    #[test]
+    fn selecting_a_span_yields_its_text() {
+        let mut t = term();
+        t.feed(b"hola mundo");
+        t.start_selection(0, 0, Side::Left, SelectionType::Simple);
+        t.update_selection(0, 3, Side::Right);
+        assert_eq!(t.selection_text().as_deref(), Some("hola"));
+        assert!(t.has_selection());
+    }
+
+    #[test]
+    fn selection_spans_lines() {
+        let mut t = term();
+        t.feed(b"uno\r\ndos");
+        t.start_selection(0, 0, Side::Left, SelectionType::Simple);
+        t.update_selection(1, 2, Side::Right);
+        assert_eq!(t.selection_text().as_deref(), Some("uno\ndos"));
+    }
+
+    #[test]
+    fn is_selected_marks_only_the_range() {
+        let mut t = term();
+        t.feed(b"hola mundo");
+        t.start_selection(0, 5, Side::Left, SelectionType::Simple);
+        t.update_selection(0, 9, Side::Right);
+        assert!(!t.is_selected(0, 4));
+        assert!(t.is_selected(0, 5));
+        assert!(t.is_selected(0, 9));
+        assert!(!t.is_selected(0, 10));
+        assert!(!t.is_selected(1, 5));
+    }
+
+    #[test]
+    fn clearing_drops_the_selection() {
+        let mut t = term();
+        t.feed(b"hola");
+        t.start_selection(0, 0, Side::Left, SelectionType::Simple);
+        t.update_selection(0, 3, Side::Right);
+        t.clear_selection();
+        assert!(!t.has_selection());
+        assert_eq!(t.selection_text(), None);
+        assert!(!t.is_selected(0, 0));
+    }
+
+    #[test]
+    fn selection_follows_the_scrollback() {
+        let mut t = Terminal::new(TermSize::new(20, 3));
+        for i in 1..=10 {
+            t.feed(format!("linea {i}\r\n").as_bytes());
+        }
+        t.scroll(Scroll::Delta(3));
+        // La fila 0 del viewport ahora es "linea 6".
+        t.start_selection(0, 0, Side::Left, SelectionType::Simple);
+        t.update_selection(0, 6, Side::Right);
+        assert_eq!(t.selection_text().as_deref(), Some("linea 6"));
     }
 
     #[test]

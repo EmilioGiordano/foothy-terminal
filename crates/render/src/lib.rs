@@ -117,6 +117,24 @@ impl Renderer {
         self.bg
     }
 
+    /// Which cell a pixel lands on, plus which half of it (for selection).
+    pub fn cell_at(
+        &self,
+        x: f64,
+        y: f64,
+        width: usize,
+        height: usize,
+        size: TermSize,
+    ) -> (usize, usize, bool) {
+        let (ox, oy) = self.origin(width, height, size);
+        let rel_x = (x - ox as f64).max(0.0);
+        let rel_y = (y - oy as f64).max(0.0);
+        let col = (rel_x as usize / self.cell_w).min(size.columns.saturating_sub(1));
+        let row = (rel_y as usize / self.cell_h).min(size.screen_lines.saturating_sub(1));
+        let right_half = (rel_x as usize % self.cell_w) * 2 >= self.cell_w;
+        (row, col, right_half)
+    }
+
     /// Where the grid starts, so leftover pixels are split evenly instead of
     /// piling up on one edge.
     fn origin(&self, width: usize, height: usize, size: TermSize) -> (usize, usize) {
@@ -222,7 +240,7 @@ impl Renderer {
                     )
                 };
 
-                if cursor == Some((row, col)) {
+                if term.is_selected(row, col) || cursor == Some((row, col)) {
                     std::mem::swap(&mut fg, &mut bg);
                 }
 

@@ -1,15 +1,17 @@
 mod chrome;
+mod clipboard;
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use input::{Key, Mods};
 use portable_pty::CommandBuilder;
 use render::Renderer;
 use vt_core::pty::Pty;
-use vt_core::{Scroll, TermSize, Terminal};
+use vt_core::{Scroll, SelectionType, Side, TermSize, Terminal};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WKey, NamedKey};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -83,6 +85,10 @@ struct App {
     mods: Mods,
     size: TermSize,
     dirty: bool,
+    mouse: (f64, f64),
+    selecting: bool,
+    last_click: Option<(Instant, usize, usize)>,
+    click_streak: u8,
 }
 
 impl App {
@@ -104,6 +110,10 @@ impl App {
             mods: Mods::default(),
             size,
             dirty: true,
+            mouse: (0.0, 0.0),
+            selecting: false,
+            last_click: None,
+            click_streak: 0,
         })
     }
 
@@ -126,6 +136,52 @@ impl App {
         }
         if eof {
             self.pty = None;
+        }
+    }
+
+    fn window_px(&self) -> (usize, usize) {
+        self.window
+            .as_ref()
+            .map(|w| {
+                let s = w.inner_size();
+                (s.width as usize, s.height as usize)
+            })
+            .unwrap_or((0, 0))
+    }
+
+    fn cell_under_mouse(&self) -> (usize, usize, bool) {
+        let (w, h) = self.window_px();
+        self.renderer
+            .cell_at(self.mouse.0, self.mouse.1, w, h, self.size)
+    }
+
+    fn copy_selection(&mut self) -> bool {
+        match self.term.selection_text() {
+            Some(text) => clipboard::set_text(&text),
+            None => false,
+        }
+    }
+
+    fn paste(&mut self) {
+        let Some(text) = clipboard::get_text() else {
+            return;
+        };
+        // Normalise to CR: that is what Enter sends, and what shells expect.
+        let text = text.replace("\r\n", "\r").replace('\n', "\r");
+        if self.term.bracketed_paste() {
+            self.send(b"\x1b[200~");
+            self.send(text.as_bytes());
+            self.send(b"\x1b[201~");
+        } else {
+            self.send(text.as_bytes());
+        }
+        self.term.scroll(Scroll::Bottom);
+    }
+
+    fn redraw_soon(&mut self) {
+        self.dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
         }
     }
 
@@ -249,6 +305,28 @@ impl ApplicationHandler for App {
                 if event.state != ElementState::Pressed {
                     return;
                 }
+                if self.mods.ctrl {
+                    match &event.logical_key {
+                        WKey::Character(c) if c.eq_ignore_ascii_case("c") => {
+                            // Ctrl+C only copies when there is a screen selection;
+                            // otherwise it must stay SIGINT (docs/05 §1.3).
+                            if (self.mods.shift || self.term.has_selection())
+                                && self.copy_selection()
+                            {
+                                self.term.clear_selection();
+                                self.redraw_soon();
+                                return;
+                            }
+                        }
+                        WKey::Character(c) if c.eq_ignore_ascii_case("v") => {
+                            self.paste();
+                            self.redraw_soon();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
                 // Shift+PgUp/PgDn navigate the scrollback instead of reaching the shell.
                 if self.mods.shift {
                     let page = match &event.logical_key {
@@ -274,7 +352,54 @@ impl ApplicationHandler for App {
                 {
                     // Typing always returns to the live view, like every terminal.
                     self.term.scroll(Scroll::Bottom);
+                    self.term.clear_selection();
                     self.send(&bytes);
+                }
+            }
+
+            WindowEvent::CursorMoved { position, .. } => {
+                self.mouse = (position.x, position.y);
+                if self.selecting {
+                    let (row, col, right) = self.cell_under_mouse();
+                    let side = if right { Side::Right } else { Side::Left };
+                    self.term.update_selection(row, col, side);
+                    self.redraw_soon();
+                }
+            }
+
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
+                let (row, col, right) = self.cell_under_mouse();
+                match state {
+                    ElementState::Pressed => {
+                        // Repeated clicks on the same cell widen the selection:
+                        // char, then word, then whole line.
+                        let now = Instant::now();
+                        let same_spot = self.last_click.is_some_and(|(t, r, c)| {
+                            (r, c) == (row, col)
+                                && now.duration_since(t) < Duration::from_millis(400)
+                        });
+                        self.click_streak = if same_spot {
+                            (self.click_streak + 1).min(2)
+                        } else {
+                            0
+                        };
+                        self.last_click = Some((now, row, col));
+
+                        let ty = match self.click_streak {
+                            0 => SelectionType::Simple,
+                            1 => SelectionType::Semantic,
+                            _ => SelectionType::Lines,
+                        };
+                        let side = if right { Side::Right } else { Side::Left };
+                        self.term.start_selection(row, col, side, ty);
+                        self.selecting = self.click_streak == 0;
+                        self.redraw_soon();
+                    }
+                    ElementState::Released => self.selecting = false,
                 }
             }
 
