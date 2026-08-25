@@ -51,7 +51,7 @@ fn main() -> anyhow::Result<()> {
     let pump = |pty: &mut Pty, term: &mut Terminal, ms: u64| {
         let until = Instant::now() + Duration::from_millis(ms);
         while Instant::now() < until {
-            let (bytes, _) = pty.drain(10);
+            let bytes = pty.drain(10).bytes;
             if !bytes.is_empty() {
                 term.feed(&bytes);
                 let replies = term.take_pty_replies();
