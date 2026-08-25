@@ -18,6 +18,8 @@ pub const PANE_PAD_X: usize = 6;
 pub struct Pane {
     pub term: Terminal,
     pub pty: Option<Pty>,
+    /// Set once the child exits: the pane keeps draining until this passes.
+    pub ending: Option<std::time::Instant>,
     /// Order of opening, shown in the header so panes stay distinguishable.
     pub number: usize,
     pub title: String,
@@ -101,6 +103,7 @@ impl Panes {
             Pane {
                 term: Terminal::with_cursor(size, CursorShape::Beam),
                 pty,
+                ending: None,
                 number: self.next_number,
                 title: String::new(),
             },
@@ -157,26 +160,70 @@ impl Panes {
         self.tree.dividers(area, DIVIDER_HIT)
     }
 
-    pub fn divider_at(&self, x: f64, y: f64, area: Rect) -> Option<Divider> {
-        self.tree.divider_at(x as f32, y as f32, area, DIVIDER_HIT)
-    }
-
     pub fn drag(&mut self, id: DividerId, delta: f32, area: Rect) -> bool {
         self.tree.drag_divider(id, delta, area)
     }
 
-    /// The pane whose header is under a point, if headers are showing.
-    pub fn header_at(&self, x: f64, y: f64, area: Rect, show_header: bool) -> Option<PaneId> {
+    /// Hit tests take the rectangles already computed instead of rebuilding the
+    /// layout: the caller does it once per relayout, not once per mouse move.
+    pub fn pane_at(rects: &HashMap<PaneId, Rect>, x: f64, y: f64) -> Option<PaneId> {
+        let (x, y) = (x as f32, y as f32);
+        rects.iter().find_map(|(id, r)| {
+            (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h).then_some(*id)
+        })
+    }
+
+    /// Overlapping hit areas at a T-junction resolve to the smaller rectangle,
+    /// which is the boundary the eye reads as nearer.
+    pub fn divider_at(dividers: &[Divider], x: f64, y: f64) -> Option<Divider> {
+        let (x, y) = (x as f32, y as f32);
+        dividers
+            .iter()
+            .copied()
+            .filter(|d| {
+                x >= d.rect.x
+                    && x <= d.rect.x + d.rect.w
+                    && y >= d.rect.y
+                    && y <= d.rect.y + d.rect.h
+            })
+            .min_by(|a, b| {
+                (a.rect.w * a.rect.h)
+                    .partial_cmp(&(b.rect.w * b.rect.h))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    }
+
+    pub fn header_at(
+        &self,
+        rects: &HashMap<PaneId, Rect>,
+        x: f64,
+        y: f64,
+        show_header: bool,
+    ) -> Option<PaneId> {
         if !show_header {
             return None;
         }
-        let id = self.pane_at(x, y, area)?;
-        let rect = *self.rects(area).get(&id)?;
-        let (header, _) = self.chrome(rect, true);
+        let id = Self::pane_at(rects, x, y)?;
+        let (header, _) = self.chrome(*rects.get(&id)?, true);
         let inside = x >= header.x as f64
             && x < (header.x + header.w) as f64
             && y >= header.y as f64
             && y < (header.y + header.h) as f64;
+        inside.then_some(id)
+    }
+
+    pub fn close_button_at(
+        &self,
+        rects: &HashMap<PaneId, Rect>,
+        x: f64,
+        y: f64,
+        show_header: bool,
+    ) -> Option<PaneId> {
+        let id = self.header_at(rects, x, y, show_header)?;
+        let (header, _) = self.chrome(*rects.get(&id)?, true);
+        let (bx, by, bw, bh) = self.close_button(header);
+        let inside =
+            x >= bx as f64 && x < (bx + bw) as f64 && y >= by as f64 && y < (by + bh) as f64;
         inside.then_some(id)
     }
 
@@ -194,17 +241,6 @@ impl Panes {
         x + w.saturating_sub(self.cell_w) / 2
     }
 
-    /// The pane whose close button is under a point.
-    pub fn close_button_at(&self, x: f64, y: f64, area: Rect, show_header: bool) -> Option<PaneId> {
-        let id = self.header_at(x, y, area, show_header)?;
-        let rect = *self.rects(area).get(&id)?;
-        let (header, _) = self.chrome(rect, true);
-        let (bx, by, bw, bh) = self.close_button(header);
-        let inside =
-            x >= bx as f64 && x < (bx + bw) as f64 && y >= by as f64 && y < (by + bh) as f64;
-        inside.then_some(id)
-    }
-
     /// Where a pane dropped here would land, with the rectangle to preview.
     pub fn drop_target(&self, x: f64, y: f64, area: Rect) -> Option<(PaneId, DropZone, Rect)> {
         self.tree.drop_target(x as f32, y as f32, area)
@@ -212,14 +248,6 @@ impl Panes {
 
     pub fn move_pane(&mut self, pane: PaneId, target: PaneId, zone: DropZone) -> bool {
         self.tree.move_pane(pane, target, zone)
-    }
-
-    /// The pane under a point.
-    pub fn pane_at(&self, x: f64, y: f64, area: Rect) -> Option<PaneId> {
-        let (x, y) = (x as f32, y as f32);
-        self.rects(area).into_iter().find_map(|(id, r)| {
-            (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h).then_some(id)
-        })
     }
 
     /// A pane's rectangle split into its header and the terminal below it.
@@ -290,23 +318,27 @@ mod tests {
     #[test]
     fn divider_is_grabbable_around_the_boundary() {
         let p = split_panes(Orientation::Horizontal);
-        assert!(p.divider_at(500.0, 300.0, AREA).is_some(), "en el centro");
-        assert!(p.divider_at(497.0, 300.0, AREA).is_some(), "al borde izq");
-        assert!(p.divider_at(503.0, 300.0, AREA).is_some(), "al borde der");
-        assert!(p.divider_at(400.0, 300.0, AREA).is_none(), "lejos");
+        let d = p.dividers(AREA);
+        assert!(
+            Panes::divider_at(&d, 500.0, 300.0).is_some(),
+            "at the centre"
+        );
+        assert!(Panes::divider_at(&d, 497.0, 300.0).is_some(), "left edge");
+        assert!(Panes::divider_at(&d, 503.0, 300.0).is_some(), "right edge");
+        assert!(Panes::divider_at(&d, 400.0, 300.0).is_none(), "far away");
     }
 
     #[test]
     fn dragging_the_divider_moves_the_boundary() {
         let mut p = split_panes(Orientation::Horizontal);
-        let d = p.divider_at(500.0, 300.0, AREA).expect("divisor");
-        assert!(p.drag(d.id, -200.0, AREA), "el arrastre deberia aplicarse");
+        let d = Panes::divider_at(&p.dividers(AREA), 500.0, 300.0).expect("divider");
+        assert!(p.drag(d.id, -200.0, AREA), "the drag should apply");
 
         let rects = p.rects(AREA);
         let left = rects[&0];
         assert!(
             (left.w - 300.0).abs() < 1.0,
-            "el borde quedo en {}, se esperaba 300",
+            "boundary landed at {}, expected 300",
             left.w
         );
     }
@@ -314,8 +346,9 @@ mod tests {
     #[test]
     fn pane_at_finds_each_side() {
         let p = split_panes(Orientation::Horizontal);
-        assert_eq!(p.pane_at(100.0, 300.0, AREA), Some(0));
-        assert_eq!(p.pane_at(900.0, 300.0, AREA), Some(1));
+        let rects = p.rects(AREA);
+        assert_eq!(Panes::pane_at(&rects, 100.0, 300.0), Some(0));
+        assert_eq!(Panes::pane_at(&rects, 900.0, 300.0), Some(1));
     }
 
     #[test]
@@ -333,11 +366,11 @@ mod tests {
         let p = split_panes(Orientation::Horizontal);
         let rect = p.rects(AREA)[&0];
         let (header, term) = p.chrome(rect, true);
-        assert_eq!(term.x, rect.x as usize + PANE_PAD_X, "margen izquierdo");
+        assert_eq!(term.x, rect.x as usize + PANE_PAD_X, "left inset");
         assert_eq!(
             term.w,
             rect.w as usize - 2 * PANE_PAD_X,
-            "margen a ambos lados"
+            "inset on both sides"
         );
         // Vertical stays tight: only the header separates panes.
         assert_eq!(term.y, header.y + header.h);
@@ -350,10 +383,10 @@ mod tests {
         let rect = p.rects(AREA)[&0];
         let (header, _) = p.chrome(rect, true);
         let (bx, by, bw, bh) = p.close_button(header);
-        assert_eq!(bx + bw, header.x + header.w, "pegado al borde derecho");
+        assert_eq!(bx + bw, header.x + header.w, "flush with the right edge");
         assert_eq!(by, header.y);
         assert_eq!(bh, header.h);
-        assert!(bw > 0 && bw < header.w, "ancho razonable: {bw}");
+        assert!(bw > 0 && bw < header.w, "sensible width: {bw}");
     }
 
     #[test]
@@ -368,7 +401,7 @@ mod tests {
         let right = (bx + bw) - (gx + p.cell_w);
         assert!(
             left.abs_diff(right) <= 1,
-            "el glifo quedo descentrado: {left} px a la izquierda, {right} a la derecha"
+            "glyph off centre: {left} px left, {right} px right"
         );
     }
 
@@ -381,11 +414,12 @@ mod tests {
 
         let inside_x = (bx + bw / 2) as f64;
         let y = (by + 5) as f64;
-        assert_eq!(p.close_button_at(inside_x, y, AREA, true), Some(0));
-        // Sobre el texto del header, no sobre el boton.
-        assert_eq!(p.close_button_at(20.0, y, AREA, true), None);
-        // Sin headers no hay boton.
-        assert_eq!(p.close_button_at(inside_x, y, AREA, false), None);
+        let rects = p.rects(AREA);
+        assert_eq!(p.close_button_at(&rects, inside_x, y, true), Some(0));
+        // On the header label, not the button.
+        assert_eq!(p.close_button_at(&rects, 20.0, y, true), None);
+        // No headers, no button.
+        assert_eq!(p.close_button_at(&rects, inside_x, y, false), None);
     }
 
     #[test]
