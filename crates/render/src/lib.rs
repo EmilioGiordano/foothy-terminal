@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
@@ -295,28 +296,37 @@ impl Renderer {
 
     fn glyph(&mut self, c: char) -> &Glyph {
         let (cell_w, cell_h, baseline) = (self.cell_w, self.cell_h, self.baseline);
-        let font_has = self.font.lookup_glyph_index(c) != 0;
-        self.glyphs.entry(c).or_insert_with(|| {
-            if !font_has && let Some(coverage) = builtin::coverage(c, cell_w, cell_h) {
-                // The blit offsets by `baseline - top`, so this lands the sprite
-                // on the cell origin and lets it fill the cell exactly.
-                return Glyph {
-                    width: cell_w,
-                    height: cell_h,
-                    left: 0,
-                    top: baseline,
-                    coverage,
+        let (font, px) = (&self.font, self.px);
+        // Everything costly stays in the vacant arm: this runs once per cell per
+        // frame, and a cache hit must not pay for a font lookup.
+        match self.glyphs.entry(c) {
+            Entry::Occupied(hit) => hit.into_mut(),
+            Entry::Vacant(slot) => {
+                let glyph = if font.lookup_glyph_index(c) == 0
+                    && let Some(coverage) = builtin::coverage(c, cell_w, cell_h)
+                {
+                    // The blit offsets by `baseline - top`, so this lands the
+                    // sprite on the cell origin and lets it fill the cell.
+                    Glyph {
+                        width: cell_w,
+                        height: cell_h,
+                        left: 0,
+                        top: baseline,
+                        coverage,
+                    }
+                } else {
+                    let (m, coverage) = font.rasterize(c, px);
+                    Glyph {
+                        width: m.width,
+                        height: m.height,
+                        left: m.xmin,
+                        top: m.height as i32 + m.ymin,
+                        coverage,
+                    }
                 };
+                slot.insert(glyph)
             }
-            let (m, coverage) = self.font.rasterize(c, self.px);
-            Glyph {
-                width: m.width,
-                height: m.height,
-                left: m.xmin,
-                top: m.height as i32 + m.ymin,
-                coverage,
-            }
-        })
+        }
     }
 
     fn resolve(&self, color: Color, default: u32) -> u32 {
