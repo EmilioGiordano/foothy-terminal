@@ -406,7 +406,8 @@ impl App {
         }
     }
 
-    /// Finishes panes whose grace period expired, once their output went quiet.
+    /// Finishes panes whose grace period expired. The tail they were kept alive
+    /// for arrived through the ordinary reads in [`Self::pump`].
     fn reap_ending(&mut self) {
         let now = Instant::now();
         let done: Vec<PaneId> = self
@@ -417,6 +418,7 @@ impl App {
             .map(|(id, _)| *id)
             .collect();
 
+        let reaped = !done.is_empty();
         for id in done {
             if let Some(pane) = self.panes.panes.get_mut(&id) {
                 pane.pty = None;
@@ -428,7 +430,11 @@ impl App {
             } else {
                 self.relayout();
             }
-            self.dirty = true;
+        }
+        // about_to_wait reaches here too, and it schedules no frame of its own:
+        // without this the closed pane stays painted until the next input.
+        if reaped {
+            self.redraw_soon();
         }
     }
 
