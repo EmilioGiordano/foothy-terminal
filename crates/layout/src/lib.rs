@@ -465,14 +465,30 @@ impl Tree {
                 });
             }
         }
+        // node_rects is a HashMap, so iteration order changes between calls.
+        // Without this the same point can grab different dividers on different
+        // frames, and the cursor icon disagrees with what the click grabs.
+        out.sort_by_key(|d| (d.id.branch, d.id.after));
         out
     }
 
     /// The divider under a point, if any.
+    ///
+    /// Hit areas overlap where an inner branch meets an outer one; the smaller
+    /// rectangle wins because it is the more specific boundary the eye sees.
     pub fn divider_at(&self, x: f32, y: f32, area: Rect, thickness: f32) -> Option<Divider> {
         self.dividers(area, thickness)
             .into_iter()
-            .find(|d| x >= d.rect.x && x <= d.rect.right() && y >= d.rect.y && y <= d.rect.bottom())
+            .filter(|d| {
+                x >= d.rect.x && x <= d.rect.right() && y >= d.rect.y && y <= d.rect.bottom()
+            })
+            .min_by(|a, b| {
+                let area_of = |d: &Divider| d.rect.w * d.rect.h;
+                area_of(a)
+                    .partial_cmp(&area_of(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| (a.id.branch, a.id.after).cmp(&(b.id.branch, b.id.after)))
+            })
     }
 
     /// Moves one boundary by `delta` pixels.
@@ -796,13 +812,33 @@ mod tests {
         assert_close(l[&left].w + l[&0].w + l[&right].w, 100.0);
     }
 
-    // --- mover un pane a otro lado del layout ---
+    #[test]
+    fn divider_at_is_stable_across_calls() {
+        // A T-junction: the outer boundary and an inner one overlap near the
+        // crossing, and node_rects is a HashMap, so order used to vary per call.
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        t.split(b, Orientation::Vertical);
+
+        let first = t.divider_at(50.0, 50.0, AREA, 8.0).map(|d| d.id);
+        for _ in 0..50 {
+            assert_eq!(t.divider_at(50.0, 50.0, AREA, 8.0).map(|d| d.id), first);
+        }
+
+        let ids: Vec<_> = t.dividers(AREA, 8.0).iter().map(|d| d.id).collect();
+        for _ in 0..20 {
+            let again: Vec<_> = t.dividers(AREA, 8.0).iter().map(|d| d.id).collect();
+            assert_eq!(again, ids, "dividers() must keep a stable order");
+        }
+    }
+
+    // --- moving a pane elsewhere in the layout ---
 
     #[test]
     fn drop_target_picks_the_nearest_edge() {
         let mut t = Tree::new();
         t.split(0, Orientation::Horizontal);
-        // Dentro del pane izquierdo (0..50 x 0..100).
+        // Inside the left pane (0..50 x 0..100).
         let (pane, zone, _) = t.drop_target(5.0, 50.0, AREA).unwrap();
         assert_eq!(pane, 0);
         assert_eq!(zone, DropZone::Left);
@@ -822,7 +858,7 @@ mod tests {
         let mut t = Tree::new();
         t.split(0, Orientation::Horizontal);
         let (_, _, preview) = t.drop_target(45.0, 50.0, AREA).unwrap();
-        // Mitad derecha del pane izquierdo.
+        // Right half of the left pane.
         assert_close(preview.x, 25.0);
         assert_close(preview.w, 25.0);
         assert_close(preview.h, 100.0);
@@ -832,7 +868,7 @@ mod tests {
     fn moving_a_pane_keeps_every_pane() {
         //   +----+----+          +----+----+
         //   |    | b  |          | c  | b  |
-        //   | 0  +----+   c a la | 0  +----+
+        //   | 0  +----+  c left  | 0  +----+
         //   |    | c  |  izq.    |    |    |
         //   +----+----+          +----+----+
         let mut t = Tree::new();
@@ -849,8 +885,8 @@ mod tests {
         );
 
         let l = t.layout(AREA);
-        // c quedo a la izquierda de 0, y b ocupa la derecha entera.
-        assert!(l[&c].x < l[&0].x, "c deberia estar a la izquierda de 0");
+        // c ended up left of 0, and b takes the whole right side.
+        assert!(l[&c].x < l[&0].x, "c should sit left of 0");
         assert_close(l[&b].h, 100.0);
     }
 
@@ -863,7 +899,7 @@ mod tests {
         let l = t.layout(AREA);
         assert_close(l[&0].w, 100.0);
         assert_close(l[&b].w, 100.0);
-        assert!(l[&b].y > l[&0].y, "b deberia quedar debajo");
+        assert!(l[&b].y > l[&0].y, "b should sit below");
     }
 
     #[test]
@@ -910,7 +946,7 @@ mod tests {
         }
     }
 
-    // --- divisores: las zonas que el usuario arrastra ---
+    // --- dividers: the boundaries the user drags ---
 
     #[test]
     fn a_single_pane_has_no_dividers() {
@@ -1015,7 +1051,7 @@ mod tests {
         assert_close(d[0].rect.h, 200.0);
     }
 
-    // --- navegacion direccional: la parte que Warp marca como dificil ---
+    // --- directional navigation: the part Warp flags as hard ---
 
     #[test]
     fn moves_between_side_by_side_panes() {
@@ -1037,7 +1073,7 @@ mod tests {
 
     #[test]
     fn crosses_branches_by_geometry_not_by_tree_order() {
-        // Izquierda ocupa toda la altura; derecha esta partida en dos.
+        // Left spans the full height; the right side is split in two.
         //   +--------+--------+
         //   |        |   b    |
         //   |   0    +--------+
@@ -1047,8 +1083,8 @@ mod tests {
         let b = t.split(0, Orientation::Horizontal).unwrap();
         let c = t.split(b, Orientation::Vertical).unwrap();
 
-        // Desde arriba a la derecha, ir a la izquierda cae en 0 aunque en el
-        // arbol 0 no sea su hermano.
+        // From the top right, moving left lands on 0 even though the tree does
+        // not make them siblings.
         assert_eq!(t.neighbour(b, Direction::Left, AREA), Some(0));
         assert_eq!(t.neighbour(c, Direction::Left, AREA), Some(0));
         assert_eq!(t.neighbour(b, Direction::Down, AREA), Some(c));
@@ -1057,10 +1093,8 @@ mod tests {
 
     #[test]
     fn picks_the_neighbour_that_overlaps_most() {
-        // 0 ocupa toda la izquierda. A la derecha hay tres apilados.
-        // Desde 0 hacia la derecha debe elegir el del medio, que es el que
-        // mas se solapa con el centro de 0... salvo que empaten, y entonces
-        // gana el mas cercano al centro.
+        // 0 spans the left. Three panes are stacked on the right; the one that
+        // overlaps 0 most wins, ties going to the nearest.
         let mut t = Tree::new();
         let b = t.split(0, Orientation::Horizontal).unwrap();
         let c = t.split(b, Orientation::Vertical).unwrap();
@@ -1071,7 +1105,7 @@ mod tests {
         assert_close(l[&c].h, 25.0);
         assert_close(l[&d].h, 25.0);
 
-        // b es el que mas alto tiene, asi que se solapa mas con 0.
+        // b is the tallest, so it overlaps 0 most.
         assert_eq!(t.neighbour(0, Direction::Right, AREA), Some(b));
     }
 
@@ -1087,7 +1121,7 @@ mod tests {
         let c = t.split(b, Orientation::Vertical).unwrap();
         let d = t.split(0, Orientation::Vertical).unwrap();
 
-        // En diagonal no hay vecino: 0 y c solo se tocan en la esquina.
+        // No diagonal neighbour: 0 and c only touch at the corner.
         assert_ne!(t.neighbour(0, Direction::Down, AREA), Some(c));
         assert_eq!(t.neighbour(0, Direction::Down, AREA), Some(d));
         assert_eq!(t.neighbour(0, Direction::Right, AREA), Some(b));
@@ -1199,7 +1233,7 @@ mod fuzz {
                 check_invariants(&t, area);
             }
 
-            // La navegacion nunca debe devolver un pane inexistente ni uno mismo.
+            // Navigation must never return a missing pane, nor the pane itself.
             let panes = t.panes();
             for &p in &panes {
                 for d in [
@@ -1233,8 +1267,8 @@ mod fuzz {
             t.split(pane, o);
         }
 
-        // Ir y volver tiene que llevarte a un pane que a su vez te devuelva al
-        // original: si no, la navegacion "se pierde" y el usuario lo nota.
+        // Going and coming back must land somewhere that leads back: otherwise
+        // navigation "gets lost" and the user notices.
         for &p in &t.panes() {
             for (go, back) in [
                 (Direction::Left, Direction::Right),
