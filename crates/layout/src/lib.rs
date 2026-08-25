@@ -34,6 +34,24 @@ impl Direction {
     }
 }
 
+/// Identifies the gap between two adjacent children of one branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DividerId {
+    branch: usize,
+    /// The divider sits after this child.
+    after: usize,
+}
+
+/// A draggable boundary between two panes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Divider {
+    pub id: DividerId,
+    /// Hit target, already widened to `thickness`.
+    pub rect: Rect,
+    /// The axis it slides along: `Horizontal` moves left and right.
+    pub orientation: Orientation,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub x: f32,
@@ -277,6 +295,121 @@ impl Tree {
         out
     }
 
+    /// Rectangles of every node, branches included: dragging needs the branch's
+    /// extent to turn a pixel delta into a flex fraction.
+    fn node_rects(&self, area: Rect) -> HashMap<NodeId, Rect> {
+        let mut out = HashMap::new();
+        self.place_nodes(self.root, area, &mut out);
+        out
+    }
+
+    fn place_nodes(&self, node: NodeId, area: Rect, out: &mut HashMap<NodeId, Rect>) {
+        out.insert(node, area);
+        if let Kind::Branch {
+            orientation,
+            children,
+            flex,
+        } = &self.nodes[node].kind
+        {
+            let mut offset = 0.0;
+            for (i, &child) in children.iter().enumerate() {
+                let last = i == children.len() - 1;
+                let rect = child_rect(area, *orientation, flex[i], offset, last);
+                offset += span_of(rect, *orientation);
+                self.place_nodes(child, rect, out);
+            }
+        }
+    }
+
+    /// Every draggable boundary, as hit targets `thickness` pixels wide.
+    pub fn dividers(&self, area: Rect, thickness: f32) -> Vec<Divider> {
+        let rects = self.node_rects(area);
+        let half = thickness / 2.0;
+        let mut out = Vec::new();
+
+        for (node, node_rect) in &rects {
+            let Kind::Branch {
+                orientation,
+                children,
+                flex,
+            } = &self.nodes[*node].kind
+            else {
+                continue;
+            };
+            let mut offset = 0.0;
+            // Every child but the last: the last one has no boundary after it.
+            for (i, share) in flex.iter().enumerate().take(children.len() - 1) {
+                let rect = child_rect(*node_rect, *orientation, *share, offset, false);
+                offset += span_of(rect, *orientation);
+                let hit = match orientation {
+                    Orientation::Horizontal => Rect::new(
+                        node_rect.x + offset - half,
+                        node_rect.y,
+                        thickness,
+                        node_rect.h,
+                    ),
+                    Orientation::Vertical => Rect::new(
+                        node_rect.x,
+                        node_rect.y + offset - half,
+                        node_rect.w,
+                        thickness,
+                    ),
+                };
+                out.push(Divider {
+                    id: DividerId {
+                        branch: *node,
+                        after: i,
+                    },
+                    rect: hit,
+                    orientation: *orientation,
+                });
+            }
+        }
+        out
+    }
+
+    /// The divider under a point, if any.
+    pub fn divider_at(&self, x: f32, y: f32, area: Rect, thickness: f32) -> Option<Divider> {
+        self.dividers(area, thickness)
+            .into_iter()
+            .find(|d| x >= d.rect.x && x <= d.rect.right() && y >= d.rect.y && y <= d.rect.bottom())
+    }
+
+    /// Moves one boundary by `delta` pixels.
+    ///
+    /// Unlike [`Tree::resize`], the space comes from the neighbour across that
+    /// boundary alone; the rest of the branch stays put, which is what dragging
+    /// a divider looks like.
+    pub fn drag_divider(&mut self, id: DividerId, delta: f32, area: Rect) -> bool {
+        let Some(branch_rect) = self.node_rects(area).get(&id.branch).copied() else {
+            return false;
+        };
+        let Kind::Branch {
+            orientation, flex, ..
+        } = &mut self.nodes[id.branch].kind
+        else {
+            return false;
+        };
+        if id.after + 1 >= flex.len() {
+            return false;
+        }
+        let extent = span_of(branch_rect, *orientation);
+        if extent <= 0.0 {
+            return false;
+        }
+
+        const MIN: f32 = 0.05;
+        let (a, b) = (id.after, id.after + 1);
+        // Clamped so neither neighbour is squeezed out of existence.
+        let applied = (delta / extent).max(MIN - flex[a]).min(flex[b] - MIN);
+        if applied.abs() < f32::EPSILON {
+            return false;
+        }
+        flex[a] += applied;
+        flex[b] -= applied;
+        true
+    }
+
     fn place(&self, node: NodeId, area: Rect, out: &mut HashMap<PaneId, Rect>) {
         match &self.nodes[node].kind {
             Kind::Leaf(pane) => {
@@ -289,31 +422,9 @@ impl Tree {
             } => {
                 let mut offset = 0.0;
                 for (i, &child) in children.iter().enumerate() {
-                    let share = flex[i];
-                    // The last child absorbs the rounding, so the area is exactly filled.
                     let last = i == children.len() - 1;
-                    let rect = match orientation {
-                        Orientation::Horizontal => {
-                            let w = if last {
-                                area.w - offset
-                            } else {
-                                area.w * share
-                            };
-                            Rect::new(area.x + offset, area.y, w, area.h)
-                        }
-                        Orientation::Vertical => {
-                            let h = if last {
-                                area.h - offset
-                            } else {
-                                area.h * share
-                            };
-                            Rect::new(area.x, area.y + offset, area.w, h)
-                        }
-                    };
-                    offset += match orientation {
-                        Orientation::Horizontal => rect.w,
-                        Orientation::Vertical => rect.h,
-                    };
+                    let rect = child_rect(area, *orientation, flex[i], offset, last);
+                    offset += span_of(rect, *orientation);
                     self.place(child, rect, out);
                 }
             }
@@ -375,6 +486,35 @@ impl Tree {
             }
         }
         best.map(|(id, _, _)| id)
+    }
+}
+
+fn span_of(rect: Rect, orientation: Orientation) -> f32 {
+    match orientation {
+        Orientation::Horizontal => rect.w,
+        Orientation::Vertical => rect.h,
+    }
+}
+
+/// The last child absorbs the rounding, so the area is exactly filled.
+fn child_rect(area: Rect, orientation: Orientation, share: f32, offset: f32, last: bool) -> Rect {
+    match orientation {
+        Orientation::Horizontal => {
+            let w = if last {
+                area.w - offset
+            } else {
+                area.w * share
+            };
+            Rect::new(area.x + offset, area.y, w, area.h)
+        }
+        Orientation::Vertical => {
+            let h = if last {
+                area.h - offset
+            } else {
+                area.h * share
+            };
+            Rect::new(area.x, area.y + offset, area.w, h)
+        }
     }
 }
 
@@ -508,6 +648,111 @@ mod tests {
         t.resize(0, 5.0);
         let l = t.layout(AREA);
         assert!(l[&b].w > 1.0, "el hermano quedo en {}", l[&b].w);
+    }
+
+    // --- divisores: las zonas que el usuario arrastra ---
+
+    #[test]
+    fn a_single_pane_has_no_dividers() {
+        let t = Tree::new();
+        assert!(t.dividers(AREA, 6.0).is_empty());
+    }
+
+    #[test]
+    fn one_split_makes_one_divider_on_the_boundary() {
+        let mut t = Tree::new();
+        t.split(0, Orientation::Horizontal);
+        let d = t.dividers(AREA, 6.0);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].orientation, Orientation::Horizontal);
+        // Centred on the 50/50 boundary and spanning the full height.
+        assert_close(d[0].rect.x + d[0].rect.w / 2.0, 50.0);
+        assert_close(d[0].rect.w, 6.0);
+        assert_close(d[0].rect.h, 100.0);
+    }
+
+    #[test]
+    fn nested_splits_expose_one_divider_per_gap() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let c = t.split(b, Orientation::Vertical).unwrap();
+        t.split(c, Orientation::Vertical);
+        // One gap on the outer branch, two on the inner one.
+        assert_eq!(t.dividers(AREA, 6.0).len(), 3);
+    }
+
+    #[test]
+    fn divider_at_finds_the_boundary_and_misses_elsewhere() {
+        let mut t = Tree::new();
+        t.split(0, Orientation::Horizontal);
+        assert!(t.divider_at(50.0, 40.0, AREA, 6.0).is_some());
+        assert!(t.divider_at(52.0, 40.0, AREA, 6.0).is_some());
+        assert!(t.divider_at(20.0, 40.0, AREA, 6.0).is_none());
+        assert!(t.divider_at(80.0, 40.0, AREA, 6.0).is_none());
+    }
+
+    #[test]
+    fn dragging_moves_the_boundary_by_the_pixels_asked() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let id = t.dividers(AREA, 6.0)[0].id;
+
+        assert!(t.drag_divider(id, 20.0, AREA));
+        let l = t.layout(AREA);
+        assert_close(l[&0].w, 70.0);
+        assert_close(l[&b].w, 30.0);
+    }
+
+    #[test]
+    fn dragging_only_touches_the_two_neighbours() {
+        // Three side by side. Moving the first boundary must leave the third alone,
+        // which is what tells a divider drag apart from `resize`.
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let c = t.split(b, Orientation::Horizontal).unwrap();
+        let before = t.layout(AREA)[&c];
+
+        let mut dividers = t.dividers(AREA, 6.0);
+        dividers.sort_by(|a, b| a.rect.x.partial_cmp(&b.rect.x).unwrap());
+        assert!(t.drag_divider(dividers[0].id, 10.0, AREA));
+
+        let l = t.layout(AREA);
+        assert_close(l[&c].w, before.w);
+        assert_close(l[&c].x, before.x);
+        assert_close(l[&0].w + l[&b].w + l[&c].w, 100.0);
+    }
+
+    #[test]
+    fn dragging_stops_before_starving_a_neighbour() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let id = t.dividers(AREA, 6.0)[0].id;
+
+        t.drag_divider(id, 10_000.0, AREA);
+        let l = t.layout(AREA);
+        assert!(l[&b].w >= 4.0, "el vecino quedo en {}", l[&b].w);
+        assert_close(l[&0].w + l[&b].w, 100.0);
+    }
+
+    #[test]
+    fn dragging_back_returns_to_the_start() {
+        let mut t = Tree::new();
+        t.split(0, Orientation::Vertical);
+        let id = t.dividers(AREA, 6.0)[0].id;
+
+        t.drag_divider(id, 25.0, AREA);
+        t.drag_divider(id, -25.0, AREA);
+        assert_close(t.layout(AREA)[&0].h, 50.0);
+    }
+
+    #[test]
+    fn dividers_follow_the_area_they_are_asked_about() {
+        let mut t = Tree::new();
+        t.split(0, Orientation::Horizontal);
+        let wide = Rect::new(0.0, 0.0, 400.0, 200.0);
+        let d = t.dividers(wide, 8.0);
+        assert_close(d[0].rect.x + d[0].rect.w / 2.0, 200.0);
+        assert_close(d[0].rect.h, 200.0);
     }
 
     // --- navegacion direccional: la parte que Warp marca como dificil ---
