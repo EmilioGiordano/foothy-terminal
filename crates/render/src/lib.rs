@@ -456,11 +456,28 @@ fn fill_rect(
 mod tests {
     use super::*;
 
-    const FONT: &str = r"C:\Windows\Fonts\CascadiaMono.ttf";
+    /// Any monospace face will do: these tests are about metrics and pixels,
+    /// not about a particular typeface. Kept as a search so layer 2 does not
+    /// hard-depend on one Windows install.
+    const FONT_CANDIDATES: &[&str] = &[
+        r"C:\Windows\Fonts\CascadiaMono.ttf",
+        r"C:\Windows\Fonts\consola.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+        "/System/Library/Fonts/Menlo.ttc",
+    ];
+
+    fn font_bytes() -> Vec<u8> {
+        for path in FONT_CANDIDATES {
+            if let Ok(bytes) = std::fs::read(path) {
+                return bytes;
+            }
+        }
+        panic!("no monospace font found; tried {FONT_CANDIDATES:?}");
+    }
 
     fn renderer() -> Renderer {
-        let bytes = std::fs::read(FONT).expect("CascadiaMono.ttf");
-        Renderer::new(&bytes, 16.0).unwrap()
+        Renderer::new(&font_bytes(), 16.0).unwrap()
     }
 
     #[test]
