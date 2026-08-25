@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::sync::{Arc, Mutex};
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
@@ -11,10 +12,10 @@ pub enum PtyEvent {
 }
 
 pub struct Pty {
-    master: Box<dyn MasterPty + Send>,
+    master: Option<Box<dyn MasterPty + Send>>,
     writer: Box<dyn Write + Send>,
     rx: Receiver<PtyEvent>,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
+    exit: Arc<Mutex<Option<portable_pty::ExitStatus>>>,
 }
 
 fn pty_size(size: TermSize) -> PtySize {
@@ -26,7 +27,7 @@ fn pty_size(size: TermSize) -> PtySize {
     }
 }
 
-pub type Waker = Box<dyn Fn() + Send + 'static>;
+pub type Waker = Arc<dyn Fn() + Send + Sync + 'static>;
 
 impl Pty {
     pub fn spawn(cmd: CommandBuilder, size: TermSize) -> anyhow::Result<Self> {
@@ -41,7 +42,7 @@ impl Pty {
         waker: Option<Waker>,
     ) -> anyhow::Result<Self> {
         let pair = native_pty_system().openpty(pty_size(size))?;
-        let child = pair.slave.spawn_command(cmd)?;
+        let mut child = pair.slave.spawn_command(cmd)?;
 
         // Holding the slave open keeps the master from ever seeing EOF.
         drop(pair.slave);
@@ -50,13 +51,14 @@ impl Pty {
         let writer = pair.master.take_writer()?;
 
         let (tx, rx) = channel();
+        let read_waker = waker.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 24 * 1024];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => {
                         let _ = tx.send(PtyEvent::Eof);
-                        if let Some(w) = &waker {
+                        if let Some(w) = &read_waker {
                             w();
                         }
                         break;
@@ -65,7 +67,7 @@ impl Pty {
                         if tx.send(PtyEvent::Output(buf[..n].to_vec())).is_err() {
                             break;
                         }
-                        if let Some(w) = &waker {
+                        if let Some(w) = &read_waker {
                             w();
                         }
                     }
@@ -73,11 +75,35 @@ impl Pty {
             }
         });
 
+        // ConPTY keeps the master open after the child exits, so the child's
+        // status is the only end-of-session signal. It is polled rather than
+        // waited on because portable-pty's `wait()` blocks forever here: its
+        // WaitForSingleObject on the ConPTY process handle never signals, while
+        // `try_wait()` reports the exit correctly. A sleeping thread costs
+        // nothing and keeps the event loop itself free of polling.
+        let exit = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&exit);
+        std::thread::spawn(move || {
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        *slot.lock().unwrap() = Some(status);
+                        if let Some(w) = &waker {
+                            w();
+                        }
+                        break;
+                    }
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                    Err(_) => break,
+                }
+            }
+        });
+
         Ok(Self {
-            master: pair.master,
+            master: Some(pair.master),
             writer,
             rx,
-            child,
+            exit,
         })
     }
 
@@ -96,7 +122,9 @@ impl Pty {
     }
 
     pub fn resize(&self, size: TermSize) -> anyhow::Result<()> {
-        self.master.resize(pty_size(size))?;
+        if let Some(master) = self.master.as_ref() {
+            master.resize(pty_size(size))?;
+        }
         Ok(())
     }
 
@@ -117,13 +145,87 @@ impl Pty {
         (out, eof)
     }
 
-    // ConPTY keeps the master open after the child exits, so EOF never arrives.
-    // Child status is the real end-of-session signal on Windows.
-    pub fn child_exited(&mut self) -> Option<portable_pty::ExitStatus> {
-        self.child.try_wait().ok().flatten()
+    pub fn child_exited(&self) -> Option<portable_pty::ExitStatus> {
+        self.exit.lock().unwrap().clone()
     }
 
     pub fn recv(&self) -> Option<PtyEvent> {
         self.rx.recv().ok()
+    }
+}
+
+impl Drop for Pty {
+    fn drop(&mut self) {
+        // ClosePseudoConsole blocks until the reader unblocks, and under ConPTY
+        // that can be never. Closing off-thread keeps the caller responsive: a
+        // UI thread that drops a Pty inline would freeze the window.
+        if let Some(master) = self.master.take() {
+            std::thread::spawn(move || drop(master));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Terminal;
+    use std::time::{Duration, Instant};
+
+    /// ConPTY blocks the child on its startup DSR query until the terminal
+    /// answers, so a test that does not pump the replies never lets the child
+    /// run at all, let alone exit.
+    fn run_until_exit(mut pty: Pty, size: TermSize) -> Option<portable_pty::ExitStatus> {
+        let mut term = Terminal::new(size);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            let (bytes, _) = pty.drain(10);
+            if !bytes.is_empty() {
+                term.feed(&bytes);
+                let replies = term.take_pty_replies();
+                if !replies.is_empty() {
+                    let _ = pty.write(&replies);
+                }
+            }
+            if let Some(status) = pty.child_exited() {
+                return Some(status);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        None
+    }
+
+    #[test]
+    fn child_exit_is_reported() {
+        let size = TermSize::new(40, 10);
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.args(["/c", "exit"]);
+        let pty = Pty::spawn(cmd, size).expect("spawn");
+        assert!(
+            run_until_exit(pty, size).is_some(),
+            "el hijo termino pero child_exited() nunca lo reporto"
+        );
+    }
+
+    #[test]
+    fn exit_wakes_the_event_loop() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let size = TermSize::new(40, 10);
+        let woke = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&woke);
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.args(["/c", "exit"]);
+        let pty = Pty::spawn_with_waker(
+            cmd,
+            size,
+            Some(Arc::new(move || flag.store(true, Ordering::SeqCst))),
+        )
+        .expect("spawn");
+
+        assert!(run_until_exit(pty, size).is_some(), "no reporto la salida");
+        assert!(
+            woke.load(Ordering::SeqCst),
+            "la salida no desperto el bucle de eventos"
+        );
     }
 }
