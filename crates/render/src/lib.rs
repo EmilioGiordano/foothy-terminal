@@ -216,8 +216,19 @@ impl Renderer {
         }
         self.tint_area(buf, width, height, (x, y, w, 1), color, alpha);
         self.tint_area(buf, width, height, (x, y + h - 1, w, 1), color, alpha);
-        self.tint_area(buf, width, height, (x, y, 1, h), color, alpha);
-        self.tint_area(buf, width, height, (x + w - 1, y, 1, h), color, alpha);
+        // Blending is not idempotent, so the sides stop short of the corners the
+        // rows above already covered.
+        if h > 2 {
+            self.tint_area(buf, width, height, (x, y + 1, 1, h - 2), color, alpha);
+            self.tint_area(
+                buf,
+                width,
+                height,
+                (x + w - 1, y + 1, 1, h - 2),
+                color,
+                alpha,
+            );
+        }
     }
 
     /// A filled rectangle, for headers, dividers and focus borders.
@@ -806,6 +817,37 @@ mod tests {
             lit(1),
             "la mitad derecha se borro: el espaciador la repinto"
         );
+    }
+
+    #[test]
+    fn the_outline_blends_every_border_pixel_exactly_once() {
+        // Blending is not idempotent: an edge written twice comes out brighter,
+        // so the four corners would read as dots.
+        let r = renderer();
+        let (width, height) = (40usize, 30usize);
+        let (x, y, w, h) = (5usize, 4usize, 20usize, 15usize);
+        let mut buf = vec![0u32; width * height];
+        r.clear(&mut buf);
+        r.outline_area(&mut buf, width, height, (x, y, w, h), 0x00ff_ffff, 110);
+
+        let corner = buf[y * width + x];
+        assert_eq!(buf[y * width + x + w / 2], corner, "top edge");
+        assert_eq!(buf[(y + h - 1) * width + x + w / 2], corner, "bottom edge");
+        assert_eq!(buf[(y + h / 2) * width + x], corner, "left edge");
+        assert_eq!(buf[(y + h / 2) * width + x + w - 1], corner, "right edge");
+        assert_eq!(buf[y * width + x + w - 1], corner, "top right corner");
+        assert_eq!(buf[(y + h - 1) * width + x], corner, "bottom left corner");
+    }
+
+    #[test]
+    fn the_outline_survives_a_rectangle_too_thin_to_have_an_inside() {
+        // A nearly collapsed pane previews as a one pixel band.
+        let r = renderer();
+        let mut buf = vec![0u32; 40 * 30];
+        r.clear(&mut buf);
+        r.outline_area(&mut buf, 40, 30, (5, 4, 20, 1), 0x00ff_ffff, 110);
+        r.outline_area(&mut buf, 40, 30, (5, 4, 1, 15), 0x00ff_ffff, 110);
+        r.outline_area(&mut buf, 40, 30, (5, 4, 2, 2), 0x00ff_ffff, 110);
     }
 
     #[test]
