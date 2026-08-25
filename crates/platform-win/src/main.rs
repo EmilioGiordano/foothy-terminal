@@ -988,9 +988,13 @@ impl ApplicationHandler for App {
                 if self.moving.is_some() {
                     let area = self.content();
                     let current = self.preview.as_ref().map(|p| p.target);
+                    // A pane cannot land next to itself: move_pane rejects it on
+                    // release, so previewing it would promise a drop that never
+                    // happens.
                     let next = self
                         .panes
-                        .drop_target(position.x, position.y, area, current);
+                        .drop_target(position.x, position.y, area, current)
+                        .filter(|(target, _, _)| Some(*target) != self.moving);
                     if next.map(|(p, z, _)| (p, z)) != current {
                         self.preview = match (next, self.preview.take()) {
                             (Some((pane, zone, rect)), Some(mut p)) => {
