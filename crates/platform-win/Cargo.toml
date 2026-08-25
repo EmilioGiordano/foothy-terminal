@@ -1,0 +1,20 @@
+[package]
+name = "platform-win"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "foot-win"
+
+[[bin]]
+name = "foot-win"
+path = "src/main.rs"
+
+[dependencies]
+vt-core = { path = "../vt-core" }
+render = { path = "../render" }
+input = { path = "../input" }
+portable-pty.workspace = true
+winit.workspace = true
+softbuffer.workspace = true
+anyhow.workspace = true
+windows-sys.workspace = true

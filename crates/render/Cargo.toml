@@ -1,0 +1,11 @@
+[package]
+name = "render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vt-core = { path = "../vt-core" }
+alacritty_terminal.workspace = true
+fontdue.workspace = true
+anyhow.workspace = true

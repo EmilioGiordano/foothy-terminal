@@ -108,8 +108,8 @@ se porten bien, o cuando llegues a la fase 5.
 > **Decisión: negociar `win32-input-mode` con ConPTY; tabla legacy como fallback;
 > protocolo Kitty diferido a fase 4.**
 > ⚠️ **Validar en la fase 0.** Cómo viaja exactamente `Ctrl+Backspace` desde tu
-> ventana hasta PSReadLine atravesando ConPTY es justo el tipo de detalle que la
-> espiga vertical existe para descubrir. Si falla, quieres saberlo en la semana 2.
+> ventana hasta PSReadLine atravesando ConPTY es justo el tipo de detalle que el
+> corte vertical existe para descubrir. Si falla, quieres saberlo en la semana 2.
 
 ### 1.3 Copiar y pegar
 
