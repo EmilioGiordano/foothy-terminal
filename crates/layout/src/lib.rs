@@ -810,18 +810,18 @@ mod tests {
                     assert_close(old.w, 50.0);
                     assert_close(fresh.w, 50.0);
                     if expect_before {
-                        assert!(fresh.x < old.x, "{zone:?}: deberia quedar antes");
+                        assert!(fresh.x < old.x, "{zone:?}: should land before");
                     } else {
-                        assert!(fresh.x > old.x, "{zone:?}: deberia quedar despues");
+                        assert!(fresh.x > old.x, "{zone:?}: should land after");
                     }
                 }
                 DropZone::Top | DropZone::Bottom => {
                     assert_close(old.h, 50.0);
                     assert_close(fresh.h, 50.0);
                     if expect_before {
-                        assert!(fresh.y < old.y, "{zone:?}: deberia quedar arriba");
+                        assert!(fresh.y < old.y, "{zone:?}: should land above");
                     } else {
-                        assert!(fresh.y > old.y, "{zone:?}: deberia quedar abajo");
+                        assert!(fresh.y > old.y, "{zone:?}: should land below");
                     }
                 }
             }
@@ -834,8 +834,8 @@ mod tests {
         let left = t.split_towards(0, DropZone::Left).unwrap();
         let right = t.split_towards(0, DropZone::Right).unwrap();
         let l = t.layout(AREA);
-        assert!(l[&left].x < l[&0].x, "izquierda");
-        assert!(l[&right].x > l[&0].x, "derecha");
+        assert!(l[&left].x < l[&0].x, "left");
+        assert!(l[&right].x > l[&0].x, "right");
         assert_close(l[&left].w + l[&0].w + l[&right].w, 100.0);
     }
 
@@ -937,7 +937,7 @@ mod tests {
         //   +----+----+          +----+----+
         //   |    | b  |          | c  | b  |
         //   | 0  +----+  c left  | 0  +----+
-        //   |    | c  |  izq.    |    |    |
+        //   |    | c  |          |    |    |
         //   +----+----+          +----+----+
         let mut t = Tree::new();
         let b = t.split(0, Orientation::Horizontal).unwrap();
