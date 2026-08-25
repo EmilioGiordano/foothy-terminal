@@ -1,7 +1,12 @@
+// A terminal must not open a console window of its own. Kept in debug so
+// eprintln diagnostics still have somewhere to go.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod chrome;
 mod clipboard;
 mod panes;
 
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -9,10 +14,10 @@ use std::time::{Duration, Instant};
 
 use input::paste::{self, Risk};
 use input::{Key, Mods};
-use layout::{Direction, DividerId, DropZone, Orientation, PaneId, Rect};
+use layout::{Direction, Divider, DividerId, DropZone, Orientation, PaneId, Rect};
 use panes::{DIVIDER_DRAW, Panes};
 use render::{CursorLook, Renderer};
-use vt_core::{Scroll, SelectionType, Side, TermEvent, TermSize};
+use vt_core::{CursorShape, Scroll, SelectionType, Side, TermEvent, TermSize};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
@@ -28,6 +33,9 @@ const BG: u32 = 0x0016_2a33;
 const FG: u32 = 0x00cf_ecf7;
 const ALPHA: u8 = 235;
 const LINES_PER_NOTCH: i32 = 3;
+/// How long to keep reading a pane after its child exits, so the last output
+/// still arrives: ConPTY leaves bytes in flight past the exit.
+const TAIL_GRACE: Duration = Duration::from_millis(60);
 
 const HEADER_FOCUSED: u32 = 0x0027_4a5c;
 const HEADER_IDLE: u32 = 0x001a_2f38;
@@ -40,6 +48,8 @@ const CLOSE_HOVER: u32 = 0x00b3_4a4a;
 /// Preference order for the close button. Picked at runtime because a font that
 /// lacks the glyph draws tofu instead, and the fancier crosses are often absent.
 const CLOSE_GLYPHS: [char; 4] = ['×', '╳', '⨯', 'x'];
+/// Same reason as the close glyph: a font without it would draw tofu.
+const FOCUS_GLYPHS: [char; 3] = ['▍', '▌', '|'];
 
 fn env_hex(key: &str, fallback: u32) -> u32 {
     std::env::var(key)
@@ -153,6 +163,10 @@ struct App {
     hwnd: isize,
     mouse: (f64, f64),
     selecting: bool,
+    /// Rebuilt only when the layout changes. A mouse move used to recompute it
+    /// half a dozen times, each allocating a map.
+    rects: HashMap<PaneId, Rect>,
+    dividers: Vec<Divider>,
     dragging: Option<DividerId>,
     /// Pane being carried by its header, and where it would land.
     moving: Option<PaneId>,
@@ -160,6 +174,7 @@ struct App {
     cursor_icon: CursorIcon,
     hover_close: Option<PaneId>,
     close_glyph: char,
+    focus_glyph: char,
     last_click: Option<(Instant, usize, usize)>,
     click_streak: u8,
     focused: bool,
@@ -177,10 +192,15 @@ impl App {
         renderer.set_colors(env_hex("FOOTWIN_FG", FG), env_hex("FOOTWIN_BG", BG));
         let header_h = renderer.header_height();
         let cell_w = renderer.cell_size().0;
-        let close_glyph = CLOSE_GLYPHS
-            .into_iter()
-            .find(|c| renderer.has_glyph(*c))
-            .unwrap_or('x');
+        let pick = |candidates: &[char], fallback: char| {
+            candidates
+                .iter()
+                .copied()
+                .find(|c| renderer.has_glyph(*c))
+                .unwrap_or(fallback)
+        };
+        let close_glyph = pick(&CLOSE_GLYPHS, 'x');
+        let focus_glyph = pick(&FOCUS_GLYPHS, '|');
         Ok(Self {
             proxy,
             window: None,
@@ -194,12 +214,15 @@ impl App {
             hwnd: 0,
             mouse: (0.0, 0.0),
             selecting: false,
+            rects: HashMap::new(),
+            dividers: Vec::new(),
             dragging: None,
             moving: None,
             drop_at: None,
             cursor_icon: CursorIcon::Default,
             hover_close: None,
             close_glyph,
+            focus_glyph,
             last_click: None,
             click_streak: 0,
             focused: true,
@@ -235,8 +258,6 @@ impl App {
     fn show_headers(&self) -> bool {
         self.panes.len() > 1
     }
-
-    // --- envío al shell del pane con foco ---
 
     fn send(&mut self, bytes: &[u8]) {
         if let Some(pane) = self.panes.focused_mut()
@@ -286,6 +307,7 @@ impl App {
         for id in finished {
             self.end_pane(id);
         }
+        self.reap_ending();
 
         // Work is capped per turn so one noisy pane cannot starve the others, but
         // the leftovers have to be claimed: the waker only fires for new bytes.
@@ -294,44 +316,58 @@ impl App {
         }
     }
 
-    /// Drains the tail before dropping the PTY, then closes that pane. The window
-    /// only goes away with the last one.
+    /// Marks a pane as ending. The tail is collected over the following turns
+    /// rather than by sleeping here: this runs on the UI thread, and stalling it
+    /// freezes input and redraw for every other pane.
     fn end_pane(&mut self, id: PaneId) {
         if let Some(pane) = self.panes.panes.get_mut(&id)
-            && let Some(pty) = pane.pty.as_ref()
+            && pane.ending.is_none()
         {
-            let quiet_until = Instant::now() + Duration::from_millis(50);
-            while Instant::now() < quiet_until {
-                let rest = pty.drain(100).bytes;
-                if rest.is_empty() {
-                    std::thread::sleep(Duration::from_millis(2));
-                } else {
-                    pane.term.feed(&rest);
-                }
-            }
-            pane.pty = None;
+            pane.ending = Some(Instant::now() + TAIL_GRACE);
         }
-
-        let area = self.content();
-        if !self.panes.close(id, area) {
-            // The last pane: nothing left to show.
-            self.panes.panes.remove(&id);
-            return;
-        }
-        self.relayout();
-        self.dirty = true;
     }
 
-    // --- geometría ---
+    /// Finishes panes whose grace period expired, once their output went quiet.
+    fn reap_ending(&mut self) {
+        let now = Instant::now();
+        let done: Vec<PaneId> = self
+            .panes
+            .panes
+            .iter()
+            .filter(|(_, p)| p.ending.is_some_and(|deadline| now >= deadline))
+            .map(|(id, _)| *id)
+            .collect();
 
-    /// Resizes every terminal and its shell to the rectangle the tree gives it.
+        for id in done {
+            if let Some(pane) = self.panes.panes.get_mut(&id) {
+                pane.pty = None;
+            }
+            let area = self.content();
+            if !self.panes.close(id, area) {
+                // The last pane: nothing left to show.
+                self.panes.panes.remove(&id);
+            } else {
+                self.relayout();
+            }
+            self.dirty = true;
+        }
+    }
+
+    fn ending_deadline(&self) -> Option<Instant> {
+        self.panes.panes.values().filter_map(|p| p.ending).min()
+    }
+
+    /// Resizes every terminal and its shell to the rectangle the tree gives it,
+    /// and refreshes the cached geometry the mouse and the renderer read.
     fn relayout(&mut self) {
         let area = self.content();
         if area.w <= 0.0 || area.h <= 0.0 {
             return;
         }
         let show = self.show_headers();
-        let rects = self.panes.rects(area);
+        self.rects = self.panes.rects(area);
+        self.dividers = self.panes.dividers(area);
+        let rects = self.rects.clone();
         for (id, rect) in rects {
             let (_, term_area) = self.panes.chrome(rect, show);
             let size = self.renderer.grid_size(term_area.w, term_area.h);
@@ -347,11 +383,27 @@ impl App {
         self.dirty = true;
     }
 
+    fn pane_at(&self, x: f64, y: f64) -> Option<PaneId> {
+        Panes::pane_at(&self.rects, x, y)
+    }
+
+    fn divider_at(&self, x: f64, y: f64) -> Option<Divider> {
+        Panes::divider_at(&self.dividers, x, y)
+    }
+
+    fn header_at(&self, x: f64, y: f64) -> Option<PaneId> {
+        self.panes.header_at(&self.rects, x, y, self.show_headers())
+    }
+
+    fn close_button_at(&self, x: f64, y: f64) -> Option<PaneId> {
+        self.panes
+            .close_button_at(&self.rects, x, y, self.show_headers())
+    }
+
     /// Which pane, and which cell inside it, a window point lands on.
     fn hit(&self, x: f64, y: f64) -> Option<(PaneId, usize, usize, bool)> {
-        let area = self.content();
-        let id = self.panes.pane_at(x, y, area)?;
-        let rect = *self.panes.rects(area).get(&id)?;
+        let id = self.pane_at(x, y)?;
+        let rect = *self.rects.get(&id)?;
         let (_, term_area) = self.panes.chrome(rect, self.show_headers());
         let pane = self.panes.panes.get(&id)?;
         let (row, col, right) = self.renderer.cell_at(
@@ -363,8 +415,6 @@ impl App {
         );
         Some((id, row, col, right))
     }
-
-    // --- acciones sobre panes ---
 
     fn split(&mut self, zone: DropZone) {
         let size = self
@@ -381,12 +431,11 @@ impl App {
     }
 
     fn close_focused(&mut self, event_loop: &ActiveEventLoop) {
-        let id = self.panes.focus;
         if self.panes.len() <= 1 {
             event_loop.exit();
             return;
         }
-        self.end_pane(id);
+        self.end_pane(self.panes.focus);
         self.redraw_soon();
     }
 
@@ -397,8 +446,6 @@ impl App {
             self.redraw_soon();
         }
     }
-
-    // --- portapapeles ---
 
     fn copy_selection(&mut self) -> bool {
         match self.panes.focused().and_then(|p| p.term.selection_text()) {
@@ -437,8 +484,6 @@ impl App {
         }
     }
 
-    // --- zoom y cursor ---
-
     fn zoom(&mut self, steps: i32) {
         let target = render::step_font_size(self.renderer.font_size(), steps);
         self.apply_font_size(target);
@@ -462,11 +507,11 @@ impl App {
             return CursorLook::Hidden;
         }
         match self.panes.focused().map(|p| p.term.cursor_style().shape) {
-            Some(CursorShapeKind::Block) => CursorLook::Block,
-            Some(CursorShapeKind::Underline) => CursorLook::Underline,
-            Some(CursorShapeKind::Beam) => CursorLook::Beam,
-            Some(CursorShapeKind::HollowBlock) => CursorLook::Hollow,
-            Some(CursorShapeKind::Hidden) | None => CursorLook::Hidden,
+            Some(CursorShape::Block) => CursorLook::Block,
+            Some(CursorShape::Underline) => CursorLook::Underline,
+            Some(CursorShape::Beam) => CursorLook::Beam,
+            Some(CursorShape::HollowBlock) => CursorLook::Hollow,
+            Some(CursorShape::Hidden) | None => CursorLook::Hidden,
         }
     }
 
@@ -494,12 +539,9 @@ impl App {
         }
     }
 
-    // --- dibujo ---
-
     fn redraw(&mut self) {
         let look = self.cursor_look();
         let show = self.show_headers();
-        let area = self.content();
         let focus = self.panes.focus;
 
         let Some(window) = self.window.clone() else {
@@ -512,11 +554,12 @@ impl App {
         };
         let (w, h) = (phys.width as usize, phys.height as usize);
 
-        let rects = self.panes.rects(area);
-        let dividers = self.panes.dividers(area);
+        let rects = self.rects.clone();
+        let dividers = self.dividers.clone();
         let preview = self.drop_at;
         let hover_close = self.hover_close;
         let close_glyph = self.close_glyph.to_string();
+        let focus_glyph = self.focus_glyph;
 
         let Some(surface) = self.surface.as_mut() else {
             return;
@@ -564,7 +607,7 @@ impl App {
                 // A marker, not colour alone, says which pane has the keyboard
                 // (docs/05 §3.2 row 2).
                 let text = if is_focus {
-                    format!("▍{label}")
+                    format!("{focus_glyph}{label}")
                 } else {
                     format!(" {label}")
                 };
@@ -647,9 +690,6 @@ impl App {
     }
 }
 
-/// Local alias so the match above reads without dragging the whole path in.
-use vt_core::CursorShape as CursorShapeKind;
-
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -680,8 +720,9 @@ impl ApplicationHandler for App {
             chrome::set_opacity(hwnd, env_or("FOOTWIN_ALPHA", ALPHA));
         }
 
-        // Sin variable, manda el sistema (que ya respeta accesibilidad).
-        // FOOTWIN_BLINK=0 lo apaga; cualquier otro numero es el periodo en ms.
+        // Unset means the system decides, and it already honours the
+        // accessibility preference. FOOTWIN_BLINK=0 turns it off; any other
+        // number is the period in milliseconds.
         self.blink = match std::env::var("FOOTWIN_BLINK")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -720,6 +761,15 @@ impl ApplicationHandler for App {
 
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
+                // The button release lands on whoever stole the focus, so a drag
+                // left armed here would resume on the next mouse move.
+                if !focused {
+                    self.dragging = None;
+                    self.moving = None;
+                    self.drop_at = None;
+                    self.selecting = false;
+                    self.set_cursor(CursorIcon::Default);
+                }
                 self.restart_blink();
                 self.redraw_soon();
             }
@@ -872,30 +922,18 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                let area = self.content();
-                let over_close =
-                    self.panes
-                        .close_button_at(position.x, position.y, area, self.show_headers());
+                let over_close = self.close_button_at(position.x, position.y);
                 if over_close != self.hover_close {
                     self.hover_close = over_close;
                     self.redraw_soon();
                 }
 
-                let icon = match self.panes.divider_at(position.x, position.y, area) {
+                let icon = match self.divider_at(position.x, position.y) {
                     Some(d) if d.orientation == Orientation::Horizontal => CursorIcon::ColResize,
                     Some(_) => CursorIcon::RowResize,
                     None if over_close.is_some() => CursorIcon::Pointer,
-                    None => {
-                        if self
-                            .panes
-                            .header_at(position.x, position.y, area, self.show_headers())
-                            .is_some()
-                        {
-                            CursorIcon::Grab
-                        } else {
-                            CursorIcon::Default
-                        }
-                    }
+                    None if self.header_at(position.x, position.y).is_some() => CursorIcon::Grab,
+                    None => CursorIcon::Default,
                 };
                 self.set_cursor(icon);
 
@@ -916,20 +954,14 @@ impl ApplicationHandler for App {
                 ..
             } => match state {
                 ElementState::Pressed => {
-                    let area = self.content();
                     // A divider takes precedence: its hit area overlaps the panes.
-                    if let Some(d) = self.panes.divider_at(self.mouse.0, self.mouse.1, area) {
+                    if let Some(d) = self.divider_at(self.mouse.0, self.mouse.1) {
                         self.dragging = Some(d.id);
                         return;
                     }
 
                     // The close button sits inside the header, so it is checked first.
-                    if let Some(id) = self.panes.close_button_at(
-                        self.mouse.0,
-                        self.mouse.1,
-                        area,
-                        self.show_headers(),
-                    ) {
+                    if let Some(id) = self.close_button_at(self.mouse.0, self.mouse.1) {
                         if self.panes.len() <= 1 {
                             event_loop.exit();
                         } else {
@@ -940,10 +972,7 @@ impl ApplicationHandler for App {
                     }
 
                     // Grabbing a header carries that pane to another slot.
-                    if let Some(id) =
-                        self.panes
-                            .header_at(self.mouse.0, self.mouse.1, area, self.show_headers())
-                    {
+                    if let Some(id) = self.header_at(self.mouse.0, self.mouse.1) {
                         self.panes.focus = id;
                         self.moving = Some(id);
                         self.drop_at = None;
@@ -1052,6 +1081,14 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.panes.panes.is_empty() {
             event_loop.exit();
+            return;
+        }
+
+        // A pane in its grace period needs one more visit even if the child has
+        // gone quiet, or it would never be reaped.
+        if let Some(deadline) = self.ending_deadline() {
+            self.reap_ending();
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
             return;
         }
 
