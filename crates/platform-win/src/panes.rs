@@ -53,6 +53,9 @@ pub struct Panes {
     next_number: usize,
     header_h: usize,
     cell_w: usize,
+    /// Base64 for `-EncodedCommand`, set once at startup so every pane opens
+    /// with the same prompt.
+    prompt: Option<String>,
 }
 
 impl Panes {
@@ -64,7 +67,12 @@ impl Panes {
             next_number: 1,
             header_h,
             cell_w,
+            prompt: None,
         }
+    }
+
+    pub fn set_prompt(&mut self, encoded: Option<String>) {
+        self.prompt = encoded;
     }
 
     pub fn set_metrics(&mut self, header_h: usize, cell_w: usize) {
@@ -88,6 +96,11 @@ impl Panes {
     pub fn open(&mut self, id: PaneId, size: TermSize, waker: Option<Arc<dyn Fn() + Send + Sync>>) {
         let mut cmd = CommandBuilder::new("powershell.exe");
         cmd.arg("-NoLogo");
+        if let Some(encoded) = self.prompt.as_deref() {
+            // -NoExit keeps the shell interactive after the script runs, and the
+            // script runs after the profile, so it is ours that wins.
+            cmd.args(["-NoExit", "-EncodedCommand", encoded]);
+        }
         if let Ok(cwd) = std::env::current_dir() {
             cmd.cwd(cwd);
         }

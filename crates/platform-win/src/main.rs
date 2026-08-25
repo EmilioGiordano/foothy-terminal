@@ -5,6 +5,7 @@
 mod chrome;
 mod clipboard;
 mod panes;
+mod prompt;
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -49,6 +50,13 @@ const PREVIEW_GLIDE: Duration = Duration::from_millis(90);
 /// Only ticks while the preview is still moving, so idle stays at zero.
 const PREVIEW_FRAME: Duration = Duration::from_millis(8);
 const CLOSE_HOVER: u32 = 0x00b3_4a4a;
+/// The prompt chip. Deliberately quieter than the pane chrome: it sits next to
+/// what you are typing, so it has to read as a label, not compete with it.
+const PROMPT_PILL: u32 = 0x000e_1418;
+const PROMPT_FOLDER: u32 = 0x005f_b3a1;
+const PROMPT_PATH: u32 = 0x00a9_c9d8;
+const PROMPT_BRANCH_ICON: u32 = 0x009d_7cd8;
+const PROMPT_BRANCH: u32 = 0x00c8_d3de;
 /// Preference order for the close button. Picked at runtime because a font that
 /// lacks the glyph draws tofu instead, and the fancier crosses are often absent.
 const CLOSE_GLYPHS: [char; 4] = ['×', '╳', '⨯', 'x'];
@@ -279,13 +287,28 @@ impl App {
         };
         let close_glyph = pick(&CLOSE_GLYPHS, 'x');
         let focus_glyph = pick(&FOCUS_GLYPHS, '|');
+
+        let mut panes = Panes::new(header_h, cell_w);
+        if env_or("FOOTWIN_PROMPT", 1) != 0 {
+            let glyphs = prompt::Glyphs::pick(|c| renderer.has_glyph(c));
+            let palette = prompt::Palette {
+                pill: PROMPT_PILL,
+                folder_icon: PROMPT_FOLDER,
+                path: PROMPT_PATH,
+                branch_icon: PROMPT_BRANCH_ICON,
+                branch: PROMPT_BRANCH,
+                chevron: PROMPT_FOLDER,
+            };
+            let script = prompt::script(&glyphs, &palette);
+            panes.set_prompt(Some(prompt::encoded_command(&script)));
+        }
         Ok(Self {
             proxy,
             window: None,
             surface: None,
             _context: None,
             renderer,
-            panes: Panes::new(header_h, cell_w),
+            panes,
             mods: Mods::default(),
             size: TermSize::new(100, 30),
             dirty: true,
