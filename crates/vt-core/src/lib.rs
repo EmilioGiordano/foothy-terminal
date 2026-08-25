@@ -11,6 +11,7 @@ use alacritty_terminal::vte::ansi::Processor;
 
 pub mod pty;
 
+pub use alacritty_terminal::event::Event as TermEvent;
 pub use alacritty_terminal::grid::Scroll;
 pub use alacritty_terminal::index::Side;
 pub use alacritty_terminal::selection::{SelectionRange, SelectionType};
