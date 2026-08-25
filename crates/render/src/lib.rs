@@ -286,6 +286,13 @@ impl Renderer {
                     std::mem::swap(&mut fg, &mut bg);
                 }
 
+                // A wide glyph owns this cell and the next, and painted both when
+                // its leading cell was reached. Touching the spacer here would
+                // repaint over the half already drawn.
+                if skip {
+                    continue;
+                }
+
                 let span = if wide { 2 } else { 1 };
                 fill_rect(
                     buf,
@@ -298,7 +305,7 @@ impl Renderer {
                     bg,
                 );
 
-                if !(skip || ch == ' ' || ch == '\0') {
+                if ch != ' ' && ch != '\0' {
                     self.blit(buf, width, height, x0, y0, ch, fg, bg);
                 }
 
@@ -647,6 +654,30 @@ mod tests {
         let start = 16.0;
         let out = step_font_size(step_font_size(start, 1), -1);
         assert!((out - start).abs() <= 1.0, "{start} -> {out}");
+    }
+
+    #[test]
+    fn a_wide_cell_keeps_both_halves() {
+        // The spacer cell used to repaint its own background after the leading
+        // cell had already drawn across both, cutting the glyph in half.
+        let mut r = renderer();
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 6, ch * 2);
+        let mut term = Terminal::new(TermSize::new(6, 2));
+        term.feed("中".as_bytes());
+        // Park the cursor on the wide char so its inverted block spans two cells.
+        term.feed(b"[1;1H");
+
+        let mut buf = vec![0u32; w * h];
+        r.draw(&term, &mut buf, w, h, CursorLook::Block);
+
+        let lit =
+            |col: usize| (0..ch).any(|y| (0..cw).any(|x| buf[y * w + col * cw + x] != DEFAULT_BG));
+        assert!(lit(0), "la celda guia deberia estar pintada");
+        assert!(
+            lit(1),
+            "la mitad derecha se borro: el espaciador la repinto"
+        );
     }
 
     #[test]
