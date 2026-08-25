@@ -1,12 +1,14 @@
 use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
-use windows_sys::Win32::Foundation::{HANDLE, HWND};
+use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HWND};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
     SetClipboardData,
 };
-use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows_sys::Win32::System::Memory::{
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+};
 
 const CF_UNICODETEXT: u32 = 13;
 
@@ -48,11 +50,19 @@ pub fn set_text(text: &str) -> bool {
         }
         let dst = GlobalLock(handle);
         if dst.is_null() {
+            GlobalFree(handle);
             return false;
         }
         std::ptr::copy_nonoverlapping(wide.as_ptr(), dst.cast::<u16>(), wide.len());
         GlobalUnlock(handle);
-        !SetClipboardData(CF_UNICODETEXT, handle as HANDLE).is_null()
+
+        // The system only takes ownership of the block once SetClipboardData
+        // succeeds; on failure it is still ours to release.
+        if SetClipboardData(CF_UNICODETEXT, handle as HANDLE).is_null() {
+            GlobalFree(handle);
+            return false;
+        }
+        true
     }
 }
 
@@ -70,8 +80,11 @@ pub fn get_text() -> Option<String> {
         if ptr.is_null() {
             return None;
         }
+        // CF_UNICODETEXT is required to be NUL-terminated, but a misbehaving
+        // producer would otherwise walk us past the allocation.
+        let cap = GlobalSize(handle as _) / 2;
         let mut len = 0;
-        while *ptr.add(len) != 0 {
+        while len < cap && *ptr.add(len) != 0 {
             len += 1;
         }
         let text = OsString::from_wide(std::slice::from_raw_parts(ptr, len));
@@ -84,9 +97,12 @@ pub fn get_text() -> Option<String> {
 mod tests {
     use super::*;
 
+    // Ignored by default: the clipboard is shared with whoever is using the
+    // machine, and only text can be put back. Run it with
+    // `cargo test -p platform-win -- --ignored`.
     #[test]
+    #[ignore]
     fn round_trip_preserves_text() {
-        // Restored afterwards: the clipboard belongs to whoever is using the machine.
         let previous = get_text();
 
         let sample = "hola mundo\nsegunda línea\ttab · 中文 · 😀";
