@@ -206,9 +206,19 @@ impl DropPreview {
         lerp_rect(self.from, self.to, ease_out(t))
     }
 
+    /// Eased progress of the fade, 0 on appearance and 1 once settled.
+    fn fade(&self) -> f32 {
+        ease_out(self.shown.elapsed().div_duration_f32(PREVIEW_FADE))
+    }
+
     fn alpha(&self) -> u8 {
-        let t = self.shown.elapsed().div_duration_f32(PREVIEW_FADE);
-        (DROP_ALPHA as f32 * ease_out(t)).round() as u8
+        (DROP_ALPHA as f32 * self.fade()).round() as u8
+    }
+
+    /// The outline settles opaque. It is the line that says where the pane
+    /// lands, and at the tint's own alpha it would not read as a boundary.
+    fn outline_alpha(&self) -> u8 {
+        (255.0 * self.fade()).round() as u8
     }
 
     fn animating(&self) -> bool {
@@ -625,7 +635,10 @@ impl App {
 
         let rects = self.rects.clone();
         let dividers = self.dividers.clone();
-        let preview = self.preview.as_ref().map(|p| (p.rect(), p.alpha()));
+        let preview = self
+            .preview
+            .as_ref()
+            .map(|p| (p.rect(), p.alpha(), p.outline_alpha()));
         let hover_close = self.hover_close;
         let close_glyph = self.close_glyph.to_string();
         let focus_glyph = self.focus_glyph;
@@ -741,7 +754,7 @@ impl App {
                 .fill_area(&mut buffer, w, h, (x, y, dw, dh), DIVIDER_COLOR);
         }
 
-        if let Some((rect, alpha)) = preview {
+        if let Some((rect, alpha, outline)) = preview {
             let area = (
                 rect.x.round().max(0.0) as usize,
                 rect.y.round().max(0.0) as usize,
@@ -751,7 +764,7 @@ impl App {
             self.renderer
                 .tint_area(&mut buffer, w, h, area, DROP_TINT, alpha);
             self.renderer
-                .outline_area(&mut buffer, w, h, area, DROP_TINT, alpha);
+                .outline_area(&mut buffer, w, h, area, DROP_TINT, outline);
         }
 
         let _ = buffer.present();
@@ -1255,6 +1268,7 @@ mod tests {
         let now = p.rect();
         assert_eq!((now.x, now.y, now.w, now.h), (10.0, 10.0, 40.0, 40.0));
         assert!(p.alpha() < DROP_ALPHA, "the tint must ramp, not appear");
+        assert!(p.outline_alpha() < 255, "so must the outline");
         assert!(p.animating());
     }
 
@@ -1282,6 +1296,7 @@ mod tests {
 
         assert!(!p.animating());
         assert_eq!(p.alpha(), DROP_ALPHA);
+        assert_eq!(p.outline_alpha(), 255);
         let settled = p.rect();
         assert_eq!((settled.x, settled.w), (50.0, 50.0));
     }
