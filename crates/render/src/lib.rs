@@ -239,6 +239,8 @@ impl Renderer {
             )
         };
 
+        // Hoisted: resolving it per cell re-runs a word/line search each time.
+        let selection = term.selection_range();
         let (ox, oy) = self.origin(width, height, TermSize::new(cols, rows));
 
         for row in 0..rows {
@@ -278,7 +280,10 @@ impl Renderer {
                 };
 
                 let on_cursor = cursor == Some((row, col));
-                if term.is_selected(row, col) || (on_cursor && cursor_look == CursorLook::Block) {
+                let selected = selection
+                    .as_ref()
+                    .is_some_and(|r| term.is_in_range(r, row, col));
+                if selected || (on_cursor && cursor_look == CursorLook::Block) {
                     std::mem::swap(&mut fg, &mut bg);
                 }
 
