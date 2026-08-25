@@ -11,6 +11,31 @@ pub enum PtyEvent {
     Eof,
 }
 
+/// Split out so it can be exercised without spawning a shell.
+fn drain_from(rx: &Receiver<PtyEvent>, max_reads: usize) -> Drained {
+    let mut bytes = Vec::new();
+    let mut eof = false;
+    let mut more = false;
+    for i in 0..max_reads {
+        match rx.try_recv() {
+            Ok(PtyEvent::Output(mut b)) => {
+                bytes.append(&mut b);
+                more = i + 1 == max_reads;
+            }
+            Ok(PtyEvent::Eof) | Err(TryRecvError::Disconnected) => {
+                eof = true;
+                more = false;
+                break;
+            }
+            Err(TryRecvError::Empty) => {
+                more = false;
+                break;
+            }
+        }
+    }
+    Drained { bytes, eof, more }
+}
+
 /// One bounded read of the child's output.
 pub struct Drained {
     pub bytes: Vec<u8>,
@@ -133,27 +158,7 @@ impl Pty {
     /// must come back: the waker only fires for *new* bytes, so whatever is left
     /// would otherwise sit unread until the child happens to write again.
     pub fn drain(&self, max_reads: usize) -> Drained {
-        let mut bytes = Vec::new();
-        let mut eof = false;
-        let mut more = false;
-        for i in 0..max_reads {
-            match self.rx.try_recv() {
-                Ok(PtyEvent::Output(mut b)) => {
-                    bytes.append(&mut b);
-                    more = i + 1 == max_reads;
-                }
-                Ok(PtyEvent::Eof) | Err(TryRecvError::Disconnected) => {
-                    eof = true;
-                    more = false;
-                    break;
-                }
-                Err(TryRecvError::Empty) => {
-                    more = false;
-                    break;
-                }
-            }
-        }
-        Drained { bytes, eof, more }
+        drain_from(&self.rx, max_reads)
     }
 
     pub fn child_exited(&self) -> Option<portable_pty::ExitStatus> {
@@ -202,40 +207,47 @@ mod tests {
     }
 
     #[test]
-    fn a_capped_drain_says_there_is_more() {
-        // Feeding the channel directly keeps this away from a real shell.
+    fn a_capped_drain_says_there_is_more_and_loses_nothing() {
         let (tx, rx) = channel();
         for _ in 0..5 {
             tx.send(PtyEvent::Output(vec![b'x'])).unwrap();
         }
-        let mut bytes = Vec::new();
-        let mut more = true;
+
+        let mut collected = Vec::new();
         let mut rounds = 0;
-        while more {
-            let mut got = Vec::new();
-            let mut hit_cap = false;
-            for i in 0..2 {
-                match rx.try_recv() {
-                    Ok(PtyEvent::Output(mut b)) => {
-                        got.append(&mut b);
-                        hit_cap = i + 1 == 2;
-                    }
-                    _ => {
-                        hit_cap = false;
-                        break;
-                    }
-                }
-            }
-            bytes.extend_from_slice(&got);
-            more = hit_cap;
+        loop {
+            let read = drain_from(&rx, 2);
+            collected.extend_from_slice(&read.bytes);
             rounds += 1;
-            assert!(rounds < 10, "no deberia dar vueltas para siempre");
+            assert!(rounds < 10, "should not spin forever");
+            if !read.more {
+                break;
+            }
         }
-        assert_eq!(
-            bytes.len(),
-            5,
-            "no se debe perder nada al acotar por vuelta"
-        );
+        assert_eq!(collected.len(), 5, "capping a read must not drop bytes");
+        assert!(rounds >= 3, "5 items with a cap of 2 needs several rounds");
+    }
+
+    #[test]
+    fn an_uncapped_drain_reports_nothing_left() {
+        let (tx, rx) = channel();
+        tx.send(PtyEvent::Output(vec![b'a', b'b'])).unwrap();
+        let read = drain_from(&rx, 10);
+        assert_eq!(read.bytes, b"ab");
+        assert!(!read.more);
+        assert!(!read.eof);
+    }
+
+    #[test]
+    fn eof_stops_the_drain() {
+        let (tx, rx) = channel();
+        tx.send(PtyEvent::Output(vec![b'a'])).unwrap();
+        tx.send(PtyEvent::Eof).unwrap();
+        tx.send(PtyEvent::Output(vec![b'z'])).unwrap();
+        let read = drain_from(&rx, 10);
+        assert_eq!(read.bytes, b"a");
+        assert!(read.eof);
+        assert!(!read.more);
     }
 
     #[test]
