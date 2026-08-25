@@ -628,7 +628,7 @@ mod tests {
         let mut buf = vec![0u32; w * h];
         r.draw(&term, &mut buf, w, h, CursorLook::Beam);
 
-        // El cursor invierte su celda, asi que solo se mira fuera de ella.
+        // The cursor inverts its own cell, so only look outside it.
         let dirty = (ch..h).any(|y| (0..w).any(|x| buf[y * w + x] != DEFAULT_BG));
         assert!(
             !dirty,
@@ -660,7 +660,7 @@ mod tests {
         let term = Terminal::new(TermSize::new(4, 2));
         let mut buf = vec![0u32; w * h];
         r.draw(&term, &mut buf, w, h, look);
-        // Columnas de la celda 0 con algun pixel distinto del fondo.
+        // Columns of cell 0 holding any pixel other than the background.
         (0..cw)
             .filter(|&x| (0..ch).any(|y| buf[y * w + x] != DEFAULT_BG))
             .count()
@@ -732,7 +732,7 @@ mod tests {
         let mut r = renderer();
         r.set_font_size(1000.0);
         assert_eq!(r.font_size(), MAX_FONT_PX);
-        // Ya esta en el tope: pedir mas no cambia nada.
+        // Already at the ceiling: asking for more changes nothing.
         assert!(!r.set_font_size(1000.0));
 
         r.set_font_size(0.1);
@@ -803,6 +803,82 @@ mod tests {
             lit(1),
             "la mitad derecha se borro: el espaciador la repinto"
         );
+    }
+
+    #[test]
+    fn draw_into_never_paints_outside_its_area() {
+        // The whole point of draw_into: a pane owns its rectangle and nothing else.
+        let mut r = renderer();
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 20, ch * 10);
+        let area = (cw * 4, ch * 2, cw * 8, ch * 4);
+
+        let mut term = Terminal::new(TermSize::new(40, 20));
+        for i in 0..20 {
+            term.feed(format!("linea {i} llena de texto para desbordar\r\n").as_bytes());
+        }
+
+        let mut buf = vec![0u32; w * h];
+        r.clear(&mut buf);
+        r.draw_into(&term, &mut buf, w, h, area, CursorLook::Block);
+
+        let (ax, ay, aw, ah) = area;
+        for y in 0..h {
+            for x in 0..w {
+                let inside = x >= ax && x < ax + aw && y >= ay && y < ay + ah;
+                if !inside {
+                    assert_eq!(
+                        buf[y * w + x],
+                        DEFAULT_BG,
+                        "pixel ({x},{y}) painted outside the area {area:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn draw_into_actually_paints_inside() {
+        let mut r = renderer();
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 20, ch * 10);
+        let area = (cw * 4, ch * 2, cw * 8, ch * 4);
+
+        let mut term = Terminal::new(TermSize::new(8, 4));
+        term.feed(b"XXXX");
+
+        let mut buf = vec![0u32; w * h];
+        r.clear(&mut buf);
+        r.draw_into(&term, &mut buf, w, h, area, CursorLook::Beam);
+
+        let (ax, ay, aw, ah) = area;
+        let painted = (ay..ay + ah).any(|y| (ax..ax + aw).any(|x| buf[y * w + x] != DEFAULT_BG));
+        assert!(painted, "nothing was drawn inside the area");
+    }
+
+    #[test]
+    fn draw_text_stops_at_max_width() {
+        let mut r = renderer();
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 20, ch * 3);
+        let mut buf = vec![0u32; w * h];
+        r.clear(&mut buf);
+
+        let limit = cw * 3;
+        r.draw_text(
+            &mut buf,
+            w,
+            h,
+            0,
+            0,
+            limit,
+            "XXXXXXXXXX",
+            DEFAULT_FG,
+            DEFAULT_BG,
+        );
+
+        let beyond = (0..ch).any(|y| (limit..w).any(|x| buf[y * w + x] != DEFAULT_BG));
+        assert!(!beyond, "draw_text wrote past max_w");
     }
 
     #[test]
