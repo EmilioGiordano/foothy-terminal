@@ -237,10 +237,18 @@ impl Terminal {
     }
 
     /// Whether a viewport cell falls inside the current selection.
+    ///
+    /// Resolving the range costs a search for word and line selections, so a
+    /// caller looping over cells should hoist [`Terminal::selection_range`] out
+    /// and use [`Terminal::is_in_range`] instead of calling this per cell.
     pub fn is_selected(&self, row: usize, col: usize) -> bool {
-        let Some(range) = self.selection_range() else {
-            return false;
-        };
+        match self.selection_range() {
+            Some(range) => self.is_in_range(&range, row, col),
+            None => false,
+        }
+    }
+
+    pub fn is_in_range(&self, range: &SelectionRange, row: usize, col: usize) -> bool {
         let point = self.point_at(row, col);
         if range.is_block {
             point.line >= range.start.line
