@@ -147,6 +147,89 @@ impl Renderer {
         self.bg = bg;
     }
 
+    pub fn header_height(&self) -> usize {
+        self.cell_h
+    }
+
+    /// Draws `text` clipped to `(x, y, w)`, and returns where it ended.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_text(
+        &mut self,
+        buf: &mut [u32],
+        width: usize,
+        height: usize,
+        x: usize,
+        y: usize,
+        max_w: usize,
+        text: &str,
+        fg: u32,
+        bg: u32,
+    ) -> usize {
+        let mut pen = x;
+        for ch in text.chars() {
+            if pen + self.cell_w > x + max_w || pen + self.cell_w > width {
+                break;
+            }
+            if ch != ' ' {
+                self.blit(buf, width, height, pen, y, ch, fg, bg);
+            }
+            pen += self.cell_w;
+        }
+        pen
+    }
+
+    /// Blends `color` over what is already there. Used for the drop preview,
+    /// which has to show the layout underneath it to be any use.
+    pub fn tint_area(
+        &self,
+        buf: &mut [u32],
+        width: usize,
+        height: usize,
+        area: (usize, usize, usize, usize),
+        color: u32,
+        alpha: u8,
+    ) {
+        let (x, y, w, h) = area;
+        for row in y..(y + h).min(height) {
+            let base = row * width;
+            for col in x..(x + w).min(width) {
+                buf[base + col] = blend(buf[base + col], color, alpha);
+            }
+        }
+    }
+
+    /// An outline, one pixel thick.
+    pub fn outline_area(
+        &self,
+        buf: &mut [u32],
+        width: usize,
+        height: usize,
+        area: (usize, usize, usize, usize),
+        color: u32,
+    ) {
+        let (x, y, w, h) = area;
+        if w == 0 || h == 0 {
+            return;
+        }
+        fill_rect(buf, width, height, x, y, w, 1, color);
+        fill_rect(buf, width, height, x, y + h - 1, w, 1, color);
+        fill_rect(buf, width, height, x, y, 1, h, color);
+        fill_rect(buf, width, height, x + w - 1, y, 1, h, color);
+    }
+
+    /// A filled rectangle, for headers, dividers and focus borders.
+    pub fn fill_area(
+        &self,
+        buf: &mut [u32],
+        width: usize,
+        height: usize,
+        area: (usize, usize, usize, usize),
+        color: u32,
+    ) {
+        let (x, y, w, h) = area;
+        fill_rect(buf, width, height, x, y, w, h, color);
+    }
+
     /// Which cell a pixel lands on, plus which half of it (for selection).
     pub fn cell_at(
         &self,
@@ -214,6 +297,12 @@ impl Renderer {
         }
     }
 
+    /// Clears the whole buffer to the background colour.
+    pub fn clear(&self, buf: &mut [u32]) {
+        buf.fill(self.bg);
+    }
+
+    /// One pane filling the whole buffer.
     pub fn draw(
         &mut self,
         term: &Terminal,
@@ -222,8 +311,24 @@ impl Renderer {
         height: usize,
         cursor_look: CursorLook,
     ) {
-        buf.fill(self.bg);
+        self.clear(buf);
+        self.draw_into(term, buf, width, height, (0, 0, width, height), cursor_look);
+    }
 
+    /// One pane inside `area` = `(x, y, w, h)` of the buffer. The caller clears
+    /// first: with several panes the buffer is shared and each one only owns its
+    /// rectangle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_into(
+        &mut self,
+        term: &Terminal,
+        buf: &mut [u32],
+        width: usize,
+        height: usize,
+        area: (usize, usize, usize, usize),
+        cursor_look: CursorLook,
+    ) {
+        let (ax, ay, aw, ah) = area;
         let offset = term.display_offset() as i32;
         let (cols, rows, cursor) = {
             let t = term.term();
@@ -241,16 +346,18 @@ impl Renderer {
 
         // Hoisted: resolving it per cell re-runs a word/line search each time.
         let selection = term.selection_range();
-        let (ox, oy) = self.origin(width, height, TermSize::new(cols, rows));
+        let (rx, ry) = self.origin(aw, ah, TermSize::new(cols, rows));
+        let (ox, oy) = (ax + rx, ay + ry);
+        let (right, bottom) = ((ax + aw).min(width), (ay + ah).min(height));
 
         for row in 0..rows {
             let y0 = oy + row * self.cell_h;
-            if y0 >= height {
+            if y0 + self.cell_h > bottom {
                 break;
             }
             for col in 0..cols {
                 let x0 = ox + col * self.cell_w;
-                if x0 >= width {
+                if x0 + self.cell_w > right {
                     break;
                 }
 
