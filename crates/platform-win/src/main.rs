@@ -294,6 +294,11 @@ impl App {
     }
 
     fn resize_grid(&mut self, width: u32, height: u32) {
+        // Minimising reports 0x0. Resizing to it would clamp the grid to one
+        // column and reflow the whole scrollback through it, which destroys it.
+        if width == 0 || height == 0 {
+            return;
+        }
         let new = self.renderer.grid_size(width as usize, height as usize);
         if new != self.size {
             self.size = new;
