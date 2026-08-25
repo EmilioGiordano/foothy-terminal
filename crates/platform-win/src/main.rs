@@ -1,22 +1,24 @@
 mod chrome;
 mod clipboard;
+mod panes;
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use input::paste::{self, Risk};
 use input::{Key, Mods};
-use portable_pty::CommandBuilder;
+use layout::{Direction, DividerId, DropZone, Orientation, PaneId, Rect};
+use panes::{DIVIDER_DRAW, Panes};
 use render::{CursorLook, Renderer};
-use vt_core::pty::Pty;
-use vt_core::{CursorShape, Scroll, SelectionType, Side, TermEvent, TermSize, Terminal};
+use vt_core::{Scroll, SelectionType, Side, TermEvent, TermSize};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WKey, NamedKey};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use winit::window::{Window, WindowId};
+use winit::window::{CursorIcon, Window, WindowId};
 
 const FONT_PATH: &str = r"C:\Windows\Fonts\CascadiaMono.ttf";
 const FONT_PX: f32 = 16.0;
@@ -25,6 +27,19 @@ const PAD: usize = 0;
 const BG: u32 = 0x0016_2a33;
 const FG: u32 = 0x00cf_ecf7;
 const ALPHA: u8 = 235;
+const LINES_PER_NOTCH: i32 = 3;
+
+const HEADER_FOCUSED: u32 = 0x0027_4a5c;
+const HEADER_IDLE: u32 = 0x001a_2f38;
+const HEADER_TEXT: u32 = 0x00cf_ecf7;
+const HEADER_TEXT_IDLE: u32 = 0x0078_8f99;
+const DIVIDER_COLOR: u32 = 0x0031_5a6d;
+const DROP_TINT: u32 = 0x004e_9ad6;
+const DROP_ALPHA: u8 = 110;
+const CLOSE_HOVER: u32 = 0x00b3_4a4a;
+/// Preference order for the close button. Picked at runtime because a font that
+/// lacks the glyph draws tofu instead, and the fancier crosses are often absent.
+const CLOSE_GLYPHS: [char; 4] = ['×', '╳', '⨯', 'x'];
 
 fn env_hex(key: &str, fallback: u32) -> u32 {
     std::env::var(key)
@@ -39,7 +54,6 @@ fn env_or<T: std::str::FromStr>(key: &str, fallback: T) -> T {
         .and_then(|v| v.parse().ok())
         .unwrap_or(fallback)
 }
-const LINES_PER_NOTCH: i32 = 3;
 
 fn preview(text: &str) -> String {
     let first = text.lines().next().unwrap_or("").trim();
@@ -103,20 +117,49 @@ fn translate(key: &WKey, text: Option<&str>) -> Option<Key> {
     })
 }
 
+/// Ctrl+Shift+arrow splits towards that side: the arrow says where the new
+/// pane goes, which is the whole point of picking arrows over letters.
+fn arrow_zone(key: &WKey) -> Option<DropZone> {
+    match key {
+        WKey::Named(NamedKey::ArrowLeft) => Some(DropZone::Left),
+        WKey::Named(NamedKey::ArrowRight) => Some(DropZone::Right),
+        WKey::Named(NamedKey::ArrowUp) => Some(DropZone::Top),
+        WKey::Named(NamedKey::ArrowDown) => Some(DropZone::Bottom),
+        _ => None,
+    }
+}
+
+fn arrow_direction(key: &WKey) -> Option<Direction> {
+    match key {
+        WKey::Named(NamedKey::ArrowLeft) => Some(Direction::Left),
+        WKey::Named(NamedKey::ArrowRight) => Some(Direction::Right),
+        WKey::Named(NamedKey::ArrowUp) => Some(Direction::Up),
+        WKey::Named(NamedKey::ArrowDown) => Some(Direction::Down),
+        _ => None,
+    }
+}
+
 struct App {
     proxy: EventLoopProxy<()>,
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     _context: Option<softbuffer::Context<Rc<Window>>>,
     renderer: Renderer,
-    term: Terminal,
-    pty: Option<Pty>,
+    panes: Panes,
     mods: Mods,
+    /// Size the first pane asks for before the window exists.
     size: TermSize,
     dirty: bool,
     hwnd: isize,
     mouse: (f64, f64),
     selecting: bool,
+    dragging: Option<DividerId>,
+    /// Pane being carried by its header, and where it would land.
+    moving: Option<PaneId>,
+    drop_at: Option<(PaneId, DropZone, Rect)>,
+    cursor_icon: CursorIcon,
+    hover_close: Option<PaneId>,
+    close_glyph: char,
     last_click: Option<(Instant, usize, usize)>,
     click_streak: u8,
     focused: bool,
@@ -132,21 +175,31 @@ impl App {
         let mut renderer = Renderer::new(&font, env_or("FOOTWIN_FONT_PX", FONT_PX))?;
         renderer.set_padding(env_or("FOOTWIN_PAD", PAD));
         renderer.set_colors(env_hex("FOOTWIN_FG", FG), env_hex("FOOTWIN_BG", BG));
-        let size = TermSize::new(100, 30);
+        let header_h = renderer.header_height();
+        let cell_w = renderer.cell_size().0;
+        let close_glyph = CLOSE_GLYPHS
+            .into_iter()
+            .find(|c| renderer.has_glyph(*c))
+            .unwrap_or('x');
         Ok(Self {
             proxy,
             window: None,
             surface: None,
             _context: None,
             renderer,
-            term: Terminal::with_cursor(size, CursorShape::Beam),
-            pty: None,
+            panes: Panes::new(header_h, cell_w),
             mods: Mods::default(),
-            size,
+            size: TermSize::new(100, 30),
             dirty: true,
             hwnd: 0,
             mouse: (0.0, 0.0),
             selecting: false,
+            dragging: None,
+            moving: None,
+            drop_at: None,
+            cursor_icon: CursorIcon::Default,
+            hover_close: None,
+            close_glyph,
             last_click: None,
             click_streak: 0,
             focused: true,
@@ -156,51 +209,11 @@ impl App {
         })
     }
 
-    fn send(&mut self, bytes: &[u8]) {
-        if let Some(pty) = self.pty.as_mut() {
-            let _ = pty.write(bytes);
-        }
-    }
-
-    fn pump_pty(&mut self) {
-        let Some(pty) = self.pty.as_mut() else { return };
-        let (bytes, eof) = pty.drain(10);
-        let exited = pty.child_exited().is_some();
-        if !bytes.is_empty() {
-            self.term.feed(&bytes);
-            self.dirty = true;
-            let replies = self.term.take_pty_replies();
-            if !replies.is_empty() {
-                self.send(&replies);
-            }
-            // Whatever is not consumed here accumulates for the whole session.
-            for event in self.term.drain_events() {
-                if let TermEvent::Title(title) = event
-                    && let Some(w) = self.window.as_ref()
-                {
-                    w.set_title(&title);
-                }
-            }
-        }
-        if eof || exited {
-            self.end_session();
-        }
-    }
-
-    /// The child exiting says nothing about the pipe being empty, so the tail is
-    /// collected before the PTY goes away or the last output is lost.
-    fn end_session(&mut self) {
-        let Some(pty) = self.pty.as_ref() else { return };
-        let quiet_until = Instant::now() + Duration::from_millis(50);
-        while Instant::now() < quiet_until {
-            let (rest, _) = pty.drain(100);
-            if rest.is_empty() {
-                std::thread::sleep(Duration::from_millis(2));
-            } else {
-                self.term.feed(&rest);
-            }
-        }
-        self.pty = None;
+    fn waker(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let proxy = self.proxy.clone();
+        Arc::new(move || {
+            let _ = proxy.send_event(());
+        })
     }
 
     fn window_px(&self) -> (usize, usize) {
@@ -213,14 +226,182 @@ impl App {
             .unwrap_or((0, 0))
     }
 
-    fn cell_under_mouse(&self) -> (usize, usize, bool) {
+    fn content(&self) -> Rect {
         let (w, h) = self.window_px();
-        self.renderer
-            .cell_at(self.mouse.0, self.mouse.1, w, h, self.size)
+        Rect::new(0.0, 0.0, w as f32, h as f32)
     }
 
+    /// Headers only earn their line once there is more than one pane to tell apart.
+    fn show_headers(&self) -> bool {
+        self.panes.len() > 1
+    }
+
+    // --- envío al shell del pane con foco ---
+
+    fn send(&mut self, bytes: &[u8]) {
+        if let Some(pane) = self.panes.focused_mut()
+            && let Some(pty) = pane.pty.as_mut()
+        {
+            let _ = pty.write(bytes);
+        }
+    }
+
+    /// Reads every pane, not just the focused one: a background pane must keep
+    /// producing output. Bounded per turn (docs/02 §3 rule 7) so a noisy pane
+    /// cannot starve the others.
+    fn pump(&mut self) {
+        let ids: Vec<PaneId> = self.panes.panes.keys().copied().collect();
+        let mut finished = Vec::new();
+        let mut pending = false;
+
+        for id in ids {
+            let Some(pane) = self.panes.panes.get_mut(&id) else {
+                continue;
+            };
+            let Some(pty) = pane.pty.as_mut() else {
+                continue;
+            };
+            let read = pty.drain(10);
+            let exited = pty.child_exited().is_some();
+            pending |= read.more;
+
+            if !read.bytes.is_empty() {
+                pane.term.feed(&read.bytes);
+                self.dirty = true;
+                let replies = pane.term.take_pty_replies();
+                if !replies.is_empty() {
+                    let _ = pty.write(&replies);
+                }
+                for event in pane.term.drain_events() {
+                    if let TermEvent::Title(t) = event {
+                        pane.title = t;
+                    }
+                }
+            }
+            if read.eof || exited {
+                finished.push(id);
+            }
+        }
+
+        for id in finished {
+            self.end_pane(id);
+        }
+
+        // Work is capped per turn so one noisy pane cannot starve the others, but
+        // the leftovers have to be claimed: the waker only fires for new bytes.
+        if pending {
+            let _ = self.proxy.send_event(());
+        }
+    }
+
+    /// Drains the tail before dropping the PTY, then closes that pane. The window
+    /// only goes away with the last one.
+    fn end_pane(&mut self, id: PaneId) {
+        if let Some(pane) = self.panes.panes.get_mut(&id)
+            && let Some(pty) = pane.pty.as_ref()
+        {
+            let quiet_until = Instant::now() + Duration::from_millis(50);
+            while Instant::now() < quiet_until {
+                let rest = pty.drain(100).bytes;
+                if rest.is_empty() {
+                    std::thread::sleep(Duration::from_millis(2));
+                } else {
+                    pane.term.feed(&rest);
+                }
+            }
+            pane.pty = None;
+        }
+
+        let area = self.content();
+        if !self.panes.close(id, area) {
+            // The last pane: nothing left to show.
+            self.panes.panes.remove(&id);
+            return;
+        }
+        self.relayout();
+        self.dirty = true;
+    }
+
+    // --- geometría ---
+
+    /// Resizes every terminal and its shell to the rectangle the tree gives it.
+    fn relayout(&mut self) {
+        let area = self.content();
+        if area.w <= 0.0 || area.h <= 0.0 {
+            return;
+        }
+        let show = self.show_headers();
+        let rects = self.panes.rects(area);
+        for (id, rect) in rects {
+            let (_, term_area) = self.panes.chrome(rect, show);
+            let size = self.renderer.grid_size(term_area.w, term_area.h);
+            if let Some(pane) = self.panes.panes.get_mut(&id)
+                && pane.term.size() != size
+            {
+                pane.term.resize(size);
+                if let Some(pty) = pane.pty.as_ref() {
+                    let _ = pty.resize(size);
+                }
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Which pane, and which cell inside it, a window point lands on.
+    fn hit(&self, x: f64, y: f64) -> Option<(PaneId, usize, usize, bool)> {
+        let area = self.content();
+        let id = self.panes.pane_at(x, y, area)?;
+        let rect = *self.panes.rects(area).get(&id)?;
+        let (_, term_area) = self.panes.chrome(rect, self.show_headers());
+        let pane = self.panes.panes.get(&id)?;
+        let (row, col, right) = self.renderer.cell_at(
+            x - term_area.x as f64,
+            y - term_area.y as f64,
+            term_area.w,
+            term_area.h,
+            pane.term.size(),
+        );
+        Some((id, row, col, right))
+    }
+
+    // --- acciones sobre panes ---
+
+    fn split(&mut self, zone: DropZone) {
+        let size = self
+            .panes
+            .focused()
+            .map(|p| p.term.size())
+            .unwrap_or(self.size);
+        if let Some(new) = self.panes.split(zone) {
+            let waker = self.waker();
+            self.panes.open(new, size, Some(waker));
+            self.relayout();
+            self.redraw_soon();
+        }
+    }
+
+    fn close_focused(&mut self, event_loop: &ActiveEventLoop) {
+        let id = self.panes.focus;
+        if self.panes.len() <= 1 {
+            event_loop.exit();
+            return;
+        }
+        self.end_pane(id);
+        self.redraw_soon();
+    }
+
+    fn navigate(&mut self, direction: Direction) {
+        let area = self.content();
+        if self.panes.navigate(direction, area) {
+            self.restart_blink();
+            self.redraw_soon();
+        }
+    }
+
+    // --- portapapeles ---
+
     fn copy_selection(&mut self) -> bool {
-        match self.term.selection_text() {
+        match self.panes.focused().and_then(|p| p.term.selection_text()) {
             Some(text) => clipboard::set_text(&text),
             None => false,
         }
@@ -233,8 +414,11 @@ impl App {
         if text.is_empty() {
             return;
         }
+        let bracketed = self
+            .panes
+            .focused()
+            .is_some_and(|p| p.term.bracketed_paste());
 
-        let bracketed = self.term.bracketed_paste();
         if env_or("FOOTWIN_PASTE_WARN", 1) != 0
             && let Some(message) = warning_for(paste::assess(&text, bracketed), &text)
             && !chrome::confirm(self.hwnd as _, "Confirmar pegado", &message)
@@ -248,8 +432,12 @@ impl App {
         } else {
             self.send(text.as_bytes());
         }
-        self.term.scroll(Scroll::Bottom);
+        if let Some(pane) = self.panes.focused_mut() {
+            pane.term.scroll(Scroll::Bottom);
+        }
     }
+
+    // --- zoom y cursor ---
 
     fn zoom(&mut self, steps: i32) {
         let target = render::step_font_size(self.renderer.font_size(), steps);
@@ -260,15 +448,9 @@ impl App {
         if !self.renderer.set_font_size(px) {
             return;
         }
-        let (w, h) = self.window_px();
-        let new = self.renderer.grid_size(w, h);
-        if new != self.size {
-            self.size = new;
-            self.term.resize(new);
-            if let Some(pty) = self.pty.as_ref() {
-                let _ = pty.resize(new);
-            }
-        }
+        self.panes
+            .set_metrics(self.renderer.header_height(), self.renderer.cell_size().0);
+        self.relayout();
         self.redraw_soon();
     }
 
@@ -279,12 +461,12 @@ impl App {
         if !self.blink_on {
             return CursorLook::Hidden;
         }
-        match self.term.cursor_style().shape {
-            CursorShape::Block => CursorLook::Block,
-            CursorShape::Underline => CursorLook::Underline,
-            CursorShape::Beam => CursorLook::Beam,
-            CursorShape::HollowBlock => CursorLook::Hollow,
-            CursorShape::Hidden => CursorLook::Hidden,
+        match self.panes.focused().map(|p| p.term.cursor_style().shape) {
+            Some(CursorShapeKind::Block) => CursorLook::Block,
+            Some(CursorShapeKind::Underline) => CursorLook::Underline,
+            Some(CursorShapeKind::Beam) => CursorLook::Beam,
+            Some(CursorShapeKind::HollowBlock) => CursorLook::Hollow,
+            Some(CursorShapeKind::Hidden) | None => CursorLook::Hidden,
         }
     }
 
@@ -294,6 +476,17 @@ impl App {
         self.blink_since = Instant::now();
     }
 
+    /// The pointer shape is the only hint that a divider can be grabbed.
+    fn set_cursor(&mut self, icon: CursorIcon) {
+        if self.cursor_icon == icon {
+            return;
+        }
+        self.cursor_icon = icon;
+        if let Some(w) = self.window.as_ref() {
+            w.set_cursor(icon);
+        }
+    }
+
     fn redraw_soon(&mut self) {
         self.dirty = true;
         if let Some(w) = self.window.as_ref() {
@@ -301,49 +494,161 @@ impl App {
         }
     }
 
-    fn resize_grid(&mut self, width: u32, height: u32) {
-        // Minimising reports 0x0. Resizing to it would clamp the grid to one
-        // column and reflow the whole scrollback through it, which destroys it.
-        if width == 0 || height == 0 {
-            return;
-        }
-        let new = self.renderer.grid_size(width as usize, height as usize);
-        if new != self.size {
-            self.size = new;
-            self.term.resize(new);
-            if let Some(pty) = self.pty.as_ref() {
-                let _ = pty.resize(new);
-            }
-            self.dirty = true;
-        }
-    }
+    // --- dibujo ---
 
     fn redraw(&mut self) {
         let look = self.cursor_look();
-        let (Some(window), Some(surface)) = (self.window.as_ref(), self.surface.as_mut()) else {
+        let show = self.show_headers();
+        let area = self.content();
+        let focus = self.panes.focus;
+
+        let Some(window) = self.window.clone() else {
             return;
         };
         let phys = window.inner_size();
-        let (Some(w), Some(h)) = (NonZeroU32::new(phys.width), NonZeroU32::new(phys.height)) else {
+        let (Some(nw), Some(nh)) = (NonZeroU32::new(phys.width), NonZeroU32::new(phys.height))
+        else {
             return;
         };
-        if surface.resize(w, h).is_err() {
+        let (w, h) = (phys.width as usize, phys.height as usize);
+
+        let rects = self.panes.rects(area);
+        let dividers = self.panes.dividers(area);
+        let preview = self.drop_at;
+        let hover_close = self.hover_close;
+        let close_glyph = self.close_glyph.to_string();
+
+        let Some(surface) = self.surface.as_mut() else {
+            return;
+        };
+        if surface.resize(nw, nh).is_err() {
             return;
         }
         let Ok(mut buffer) = surface.buffer_mut() else {
             return;
         };
-        self.renderer.draw(
-            &self.term,
-            &mut buffer,
-            phys.width as usize,
-            phys.height as usize,
-            look,
-        );
+
+        self.renderer.clear(&mut buffer);
+
+        let mut ordered: Vec<(PaneId, Rect)> = rects.into_iter().collect();
+        ordered.sort_by_key(|(id, _)| *id);
+
+        for (id, rect) in ordered {
+            let (header, term_area) = self.panes.chrome(rect, show);
+            let is_focus = id == focus;
+
+            if show && header.h > 0 {
+                let bg = if is_focus {
+                    HEADER_FOCUSED
+                } else {
+                    HEADER_IDLE
+                };
+                let fg = if is_focus {
+                    HEADER_TEXT
+                } else {
+                    HEADER_TEXT_IDLE
+                };
+                self.renderer.fill_area(
+                    &mut buffer,
+                    w,
+                    h,
+                    (header.x, header.y, header.w, header.h),
+                    bg,
+                );
+                let label = self
+                    .panes
+                    .panes
+                    .get(&id)
+                    .map(|p| p.label())
+                    .unwrap_or_default();
+                // A marker, not colour alone, says which pane has the keyboard
+                // (docs/05 §3.2 row 2).
+                let text = if is_focus {
+                    format!("▍{label}")
+                } else {
+                    format!(" {label}")
+                };
+
+                let (bx, by, bw, bh) = self.panes.close_button(header);
+                // The label stops where the button starts.
+                let label_w = bx.saturating_sub(header.x);
+                self.renderer.draw_text(
+                    &mut buffer,
+                    w,
+                    h,
+                    header.x,
+                    header.y,
+                    label_w,
+                    &text,
+                    fg,
+                    bg,
+                );
+
+                let hovered = hover_close == Some(id);
+                if hovered {
+                    self.renderer
+                        .fill_area(&mut buffer, w, h, (bx, by, bw, bh), CLOSE_HOVER);
+                }
+                let gx = self.panes.close_glyph_x(header);
+                self.renderer.draw_text(
+                    &mut buffer,
+                    w,
+                    h,
+                    gx,
+                    by,
+                    bx + bw - gx,
+                    &close_glyph,
+                    if hovered { HEADER_TEXT } else { fg },
+                    if hovered { CLOSE_HOVER } else { bg },
+                );
+            }
+
+            if let Some(pane) = self.panes.panes.get(&id) {
+                let cursor = if is_focus { look } else { CursorLook::Hollow };
+                self.renderer
+                    .draw_into(&pane.term, &mut buffer, w, h, term_area.tuple(), cursor);
+            }
+        }
+
+        for d in dividers {
+            let (x, y, dw, dh) = match d.orientation {
+                Orientation::Horizontal => (
+                    (d.rect.x + d.rect.w / 2.0).round().max(0.0) as usize,
+                    d.rect.y.round().max(0.0) as usize,
+                    DIVIDER_DRAW,
+                    d.rect.h.round().max(0.0) as usize,
+                ),
+                Orientation::Vertical => (
+                    d.rect.x.round().max(0.0) as usize,
+                    (d.rect.y + d.rect.h / 2.0).round().max(0.0) as usize,
+                    d.rect.w.round().max(0.0) as usize,
+                    DIVIDER_DRAW,
+                ),
+            };
+            self.renderer
+                .fill_area(&mut buffer, w, h, (x, y, dw, dh), DIVIDER_COLOR);
+        }
+
+        if let Some((_, _, preview)) = preview {
+            let area = (
+                preview.x.round().max(0.0) as usize,
+                preview.y.round().max(0.0) as usize,
+                preview.w.round().max(0.0) as usize,
+                preview.h.round().max(0.0) as usize,
+            );
+            self.renderer
+                .tint_area(&mut buffer, w, h, area, DROP_TINT, DROP_ALPHA);
+            self.renderer
+                .outline_area(&mut buffer, w, h, area, DROP_TINT);
+        }
+
         let _ = buffer.present();
         self.dirty = false;
     }
 }
+
+/// Local alias so the match above reads without dragging the whole path in.
+use vt_core::CursorShape as CursorShapeKind;
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -352,7 +657,7 @@ impl ApplicationHandler for App {
         }
         let (cw, ch) = self.renderer.cell_size();
         let attrs = Window::default_attributes()
-            .with_title("foot-win — fase 0")
+            .with_title("foot-win")
             // Physical, not logical: the cell metrics come from a font rasterised
             // at a pixel size, so scaling them again by the DPI factor would ask
             // for a window 1.5x too large at 150%.
@@ -389,32 +694,19 @@ impl ApplicationHandler for App {
             self.blink_on = true;
         }
 
-        let phys = window.inner_size();
         self.window = Some(window);
         self._context = Some(context);
         self.surface = Some(surface);
-        self.resize_grid(phys.width, phys.height);
 
-        let proxy = self.proxy.clone();
-        let mut cmd = CommandBuilder::new("powershell.exe");
-        cmd.arg("-NoLogo");
-        if let Ok(cwd) = std::env::current_dir() {
-            cmd.cwd(cwd);
-        }
-        match Pty::spawn_with_waker(
-            cmd,
-            self.size,
-            Some(std::sync::Arc::new(move || {
-                let _ = proxy.send_event(());
-            })),
-        ) {
-            Ok(pty) => self.pty = Some(pty),
-            Err(e) => eprintln!("no se pudo abrir el PTY: {e}"),
-        }
+        let (w, h) = self.window_px();
+        self.size = self.renderer.grid_size(w, h);
+        let waker = self.waker();
+        self.panes.open(0, self.size, Some(waker));
+        self.relayout();
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _: ()) {
-        self.pump_pty();
+        self.pump();
         if let Some(w) = self.window.as_ref()
             && self.dirty
         {
@@ -433,10 +725,13 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::Resized(size) => {
-                self.resize_grid(size.width, size.height);
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
+                // Minimising reports 0x0. Resizing to it would clamp every grid to
+                // one column and reflow the scrollback through it, destroying it.
+                if size.width == 0 || size.height == 0 {
+                    return;
                 }
+                self.relayout();
+                self.redraw_soon();
             }
 
             WindowEvent::ModifiersChanged(m) => {
@@ -452,6 +747,29 @@ impl ApplicationHandler for App {
                 if event.state != ElementState::Pressed {
                     return;
                 }
+
+                // Alt+arrows move the focus between panes.
+                if self.mods.alt
+                    && !self.mods.ctrl
+                    && let Some(dir) = arrow_direction(&event.logical_key)
+                {
+                    self.navigate(dir);
+                    return;
+                }
+
+                if self.mods.ctrl && self.mods.shift {
+                    if let Some(zone) = arrow_zone(&event.logical_key) {
+                        self.split(zone);
+                        return;
+                    }
+                    if let WKey::Character(c) = &event.logical_key
+                        && c.eq_ignore_ascii_case("w")
+                    {
+                        self.close_focused(event_loop);
+                        return;
+                    }
+                }
+
                 if self.mods.ctrl {
                     let zoom = match &event.logical_key {
                         WKey::Character(c) if c == "+" || c == "=" => Some(1),
@@ -469,14 +787,16 @@ impl ApplicationHandler for App {
                         return;
                     }
 
+                    let has_selection =
+                        self.panes.focused().is_some_and(|p| p.term.has_selection());
                     match &event.logical_key {
                         WKey::Character(c) if c.eq_ignore_ascii_case("c") => {
                             // Ctrl+C only copies when there is a screen selection;
                             // otherwise it must stay SIGINT (docs/05 §1.3).
-                            if (self.mods.shift || self.term.has_selection())
-                                && self.copy_selection()
-                            {
-                                self.term.clear_selection();
+                            if (self.mods.shift || has_selection) && self.copy_selection() {
+                                if let Some(pane) = self.panes.focused_mut() {
+                                    pane.term.clear_selection();
+                                }
                                 self.redraw_soon();
                                 return;
                             }
@@ -500,11 +820,10 @@ impl ApplicationHandler for App {
                         _ => None,
                     };
                     if let Some(scroll) = page {
-                        self.term.scroll(scroll);
-                        self.dirty = true;
-                        if let Some(w) = self.window.as_ref() {
-                            w.request_redraw();
+                        if let Some(pane) = self.panes.focused_mut() {
+                            pane.term.scroll(scroll);
                         }
+                        self.redraw_soon();
                         return;
                     }
                 }
@@ -513,20 +832,80 @@ impl ApplicationHandler for App {
                 if let Some(key) = translate(&event.logical_key, text)
                     && let Some(bytes) = input::encode(&key, self.mods)
                 {
-                    // Typing always returns to the live view, like every terminal.
-                    self.term.scroll(Scroll::Bottom);
-                    self.term.clear_selection();
+                    if let Some(pane) = self.panes.focused_mut() {
+                        // Typing always returns to the live view, like every terminal.
+                        pane.term.scroll(Scroll::Bottom);
+                        pane.term.clear_selection();
+                    }
                     self.restart_blink();
                     self.send(&bytes);
                 }
             }
 
             WindowEvent::CursorMoved { position, .. } => {
+                let previous = self.mouse;
                 self.mouse = (position.x, position.y);
-                if self.selecting {
-                    let (row, col, right) = self.cell_under_mouse();
+
+                // Carrying a pane by its header: keep showing where it would land.
+                if self.moving.is_some() {
+                    let area = self.content();
+                    let next = self.panes.drop_target(position.x, position.y, area);
+                    if next.map(|(p, z, _)| (p, z)) != self.drop_at.map(|(p, z, _)| (p, z)) {
+                        self.drop_at = next;
+                        self.redraw_soon();
+                    }
+                    return;
+                }
+
+                if let Some(id) = self.dragging {
+                    let area = self.content();
+                    let divider = self.panes.dividers(area).into_iter().find(|d| d.id == id);
+                    let delta = match divider.map(|d| d.orientation) {
+                        Some(Orientation::Horizontal) => position.x - previous.0,
+                        Some(Orientation::Vertical) => position.y - previous.1,
+                        None => 0.0,
+                    };
+                    if delta != 0.0 && self.panes.drag(id, delta as f32, area) {
+                        self.relayout();
+                        self.redraw_soon();
+                    }
+                    return;
+                }
+
+                let area = self.content();
+                let over_close =
+                    self.panes
+                        .close_button_at(position.x, position.y, area, self.show_headers());
+                if over_close != self.hover_close {
+                    self.hover_close = over_close;
+                    self.redraw_soon();
+                }
+
+                let icon = match self.panes.divider_at(position.x, position.y, area) {
+                    Some(d) if d.orientation == Orientation::Horizontal => CursorIcon::ColResize,
+                    Some(_) => CursorIcon::RowResize,
+                    None if over_close.is_some() => CursorIcon::Pointer,
+                    None => {
+                        if self
+                            .panes
+                            .header_at(position.x, position.y, area, self.show_headers())
+                            .is_some()
+                        {
+                            CursorIcon::Grab
+                        } else {
+                            CursorIcon::Default
+                        }
+                    }
+                };
+                self.set_cursor(icon);
+
+                if self.selecting
+                    && let Some((id, row, col, right)) = self.hit(position.x, position.y)
+                    && id == self.panes.focus
+                    && let Some(pane) = self.panes.focused_mut()
+                {
                     let side = if right { Side::Right } else { Side::Left };
-                    self.term.update_selection(row, col, side);
+                    pane.term.update_selection(row, col, side);
                     self.redraw_soon();
                 }
             }
@@ -535,37 +914,94 @@ impl ApplicationHandler for App {
                 state,
                 button: MouseButton::Left,
                 ..
-            } => {
-                let (row, col, right) = self.cell_under_mouse();
-                match state {
-                    ElementState::Pressed => {
-                        // Repeated clicks on the same cell widen the selection:
-                        // char, then word, then whole line.
-                        let now = Instant::now();
-                        let same_spot = self.last_click.is_some_and(|(t, r, c)| {
-                            (r, c) == (row, col)
-                                && now.duration_since(t) < Duration::from_millis(400)
-                        });
-                        self.click_streak = if same_spot {
-                            (self.click_streak + 1).min(2)
-                        } else {
-                            0
-                        };
-                        self.last_click = Some((now, row, col));
+            } => match state {
+                ElementState::Pressed => {
+                    let area = self.content();
+                    // A divider takes precedence: its hit area overlaps the panes.
+                    if let Some(d) = self.panes.divider_at(self.mouse.0, self.mouse.1, area) {
+                        self.dragging = Some(d.id);
+                        return;
+                    }
 
-                        let ty = match self.click_streak {
-                            0 => SelectionType::Simple,
-                            1 => SelectionType::Semantic,
-                            _ => SelectionType::Lines,
-                        };
-                        let side = if right { Side::Right } else { Side::Left };
-                        self.term.start_selection(row, col, side, ty);
-                        self.selecting = self.click_streak == 0;
+                    // The close button sits inside the header, so it is checked first.
+                    if let Some(id) = self.panes.close_button_at(
+                        self.mouse.0,
+                        self.mouse.1,
+                        area,
+                        self.show_headers(),
+                    ) {
+                        if self.panes.len() <= 1 {
+                            event_loop.exit();
+                        } else {
+                            self.end_pane(id);
+                            self.redraw_soon();
+                        }
+                        return;
+                    }
+
+                    // Grabbing a header carries that pane to another slot.
+                    if let Some(id) =
+                        self.panes
+                            .header_at(self.mouse.0, self.mouse.1, area, self.show_headers())
+                    {
+                        self.panes.focus = id;
+                        self.moving = Some(id);
+                        self.drop_at = None;
+                        self.set_cursor(CursorIcon::Grabbing);
+                        self.restart_blink();
+                        self.redraw_soon();
+                        return;
+                    }
+
+                    let Some((id, row, col, right)) = self.hit(self.mouse.0, self.mouse.1) else {
+                        return;
+                    };
+                    if self.panes.focus != id {
+                        self.panes.focus = id;
+                        self.restart_blink();
+                    }
+
+                    // Repeated clicks on the same cell widen the selection:
+                    // char, then word, then whole line.
+                    let now = Instant::now();
+                    let same_spot = self.last_click.is_some_and(|(t, r, c)| {
+                        (r, c) == (row, col) && now.duration_since(t) < Duration::from_millis(400)
+                    });
+                    self.click_streak = if same_spot {
+                        (self.click_streak + 1).min(2)
+                    } else {
+                        0
+                    };
+                    self.last_click = Some((now, row, col));
+
+                    let ty = match self.click_streak {
+                        0 => SelectionType::Simple,
+                        1 => SelectionType::Semantic,
+                        _ => SelectionType::Lines,
+                    };
+                    let side = if right { Side::Right } else { Side::Left };
+                    if let Some(pane) = self.panes.focused_mut() {
+                        pane.term.start_selection(row, col, side, ty);
+                    }
+                    self.selecting = self.click_streak == 0;
+                    self.redraw_soon();
+                }
+                ElementState::Released => {
+                    self.selecting = false;
+                    self.dragging = None;
+
+                    if let Some(pane) = self.moving.take() {
+                        if let Some((target, zone, _)) = self.drop_at.take()
+                            && self.panes.move_pane(pane, target, zone)
+                        {
+                            self.relayout();
+                        }
+                        self.drop_at = None;
+                        self.set_cursor(CursorIcon::Default);
                         self.redraw_soon();
                     }
-                    ElementState::Released => self.selecting = false,
                 }
-            }
+            },
 
             // foot binds BTN_MIDDLE to paste (doc/foot.ini.5.scd). There is no
             // primary selection on Windows, so it pastes the clipboard.
@@ -593,12 +1029,17 @@ impl ApplicationHandler for App {
                         (p.y / self.renderer.cell_size().1 as f64) as i32
                     }
                 };
-                if lines != 0 {
-                    self.term.scroll(Scroll::Delta(lines));
-                    self.dirty = true;
-                    if let Some(w) = self.window.as_ref() {
-                        w.request_redraw();
-                    }
+                if lines == 0 {
+                    return;
+                }
+                // The wheel scrolls the pane under the pointer, not the focused one.
+                let target = self
+                    .hit(self.mouse.0, self.mouse.1)
+                    .map(|(id, ..)| id)
+                    .unwrap_or(self.panes.focus);
+                if let Some(pane) = self.panes.panes.get_mut(&target) {
+                    pane.term.scroll(Scroll::Delta(lines));
+                    self.redraw_soon();
                 }
             }
 
@@ -609,7 +1050,7 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.pty.is_none() {
+        if self.panes.panes.is_empty() {
             event_loop.exit();
             return;
         }
@@ -621,8 +1062,7 @@ impl ApplicationHandler for App {
             return;
         };
 
-        let elapsed = self.blink_since.elapsed();
-        if elapsed >= period {
+        if self.blink_since.elapsed() >= period {
             self.blink_on = !self.blink_on;
             self.blink_since = Instant::now();
             if let Some(w) = self.window.as_ref() {
@@ -673,5 +1113,39 @@ mod tests {
         let shown = preview(&long);
         assert!(shown.chars().count() <= 71, "{}", shown.chars().count());
         assert!(shown.ends_with('…'));
+    }
+
+    #[test]
+    fn ctrl_shift_arrows_split_towards_that_side() {
+        assert_eq!(
+            arrow_zone(&WKey::Named(NamedKey::ArrowLeft)),
+            Some(DropZone::Left)
+        );
+        assert_eq!(
+            arrow_zone(&WKey::Named(NamedKey::ArrowRight)),
+            Some(DropZone::Right)
+        );
+        assert_eq!(
+            arrow_zone(&WKey::Named(NamedKey::ArrowUp)),
+            Some(DropZone::Top)
+        );
+        assert_eq!(
+            arrow_zone(&WKey::Named(NamedKey::ArrowDown)),
+            Some(DropZone::Bottom)
+        );
+        assert_eq!(arrow_zone(&WKey::Named(NamedKey::Enter)), None);
+    }
+
+    #[test]
+    fn alt_arrows_map_to_directions() {
+        assert_eq!(
+            arrow_direction(&WKey::Named(NamedKey::ArrowLeft)),
+            Some(Direction::Left)
+        );
+        assert_eq!(
+            arrow_direction(&WKey::Named(NamedKey::ArrowDown)),
+            Some(Direction::Down)
+        );
+        assert_eq!(arrow_direction(&WKey::Named(NamedKey::Enter)), None);
     }
 }
