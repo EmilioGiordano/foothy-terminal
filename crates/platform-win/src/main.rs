@@ -54,9 +54,9 @@ const CLOSE_HOVER: u32 = 0x00b3_4a4a;
 /// what you are typing, so it has to read as a label, not compete with it.
 const PROMPT_PILL: u32 = 0x000e_1418;
 const PROMPT_FOLDER: u32 = 0x005f_b3a1;
-const PROMPT_PATH: u32 = 0x00a9_c9d8;
+const PROMPT_PATH: u32 = 0x00dc_ecf5;
 const PROMPT_BRANCH_ICON: u32 = 0x009d_7cd8;
-const PROMPT_BRANCH: u32 = 0x00c8_d3de;
+const PROMPT_BRANCH: u32 = 0x00e8_eef5;
 /// Preference order for the close button. Picked at runtime because a font that
 /// lacks the glyph draws tofu instead, and the fancier crosses are often absent.
 const CLOSE_GLYPHS: [char; 4] = ['×', '╳', '⨯', 'x'];

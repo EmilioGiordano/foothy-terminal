@@ -245,9 +245,9 @@ mod tests {
         Palette {
             pill: 0x000e_1418,
             folder_icon: 0x005f_b3a1,
-            path: 0x00a9_c9d8,
+            path: 0x00dc_ecf5,
             branch_icon: 0x009d_7cd8,
-            branch: 0x00c8_d3de,
+            branch: 0x00e8_eef5,
             chevron: 0x005f_b3a1,
         }
     }
@@ -306,7 +306,7 @@ mod tests {
     #[test]
     fn the_colours_come_out_as_decimal_channels() {
         let s = script(&Glyphs::pick(cascadia), &palette());
-        assert!(s.contains("38;2;169;201;216"), "path colour missing");
+        assert!(s.contains("38;2;220;236;245"), "path colour missing");
         assert!(s.contains("48;2;14;20;24"), "pill fill missing");
     }
 
@@ -361,9 +361,9 @@ mod diagnostics {
         let p = Palette {
             pill: 0x000e_1418,
             folder_icon: 0x005f_b3a1,
-            path: 0x00a9_c9d8,
+            path: 0x00dc_ecf5,
             branch_icon: 0x009d_7cd8,
-            branch: 0x00c8_d3de,
+            branch: 0x00e8_eef5,
             chevron: 0x005f_b3a1,
         };
         let out = std::env::var("FOOTWIN_DUMP").expect("set FOOTWIN_DUMP to a path");
