@@ -639,8 +639,6 @@ impl App {
         };
         let (w, h) = (phys.width as usize, phys.height as usize);
 
-        let rects = self.rects.clone();
-        let dividers = self.dividers.clone();
         let preview = self
             .preview
             .as_ref()
@@ -661,7 +659,9 @@ impl App {
 
         self.renderer.clear(&mut buffer);
 
-        let mut ordered: Vec<(PaneId, Rect)> = rects.into_iter().collect();
+        // Sorted so panes always paint in the same order; the cache itself is a
+        // map and must not be cloned every frame.
+        let mut ordered: Vec<(PaneId, Rect)> = self.rects.iter().map(|(id, r)| (*id, *r)).collect();
         ordered.sort_by_key(|(id, _)| *id);
 
         for (id, rect) in ordered {
@@ -741,7 +741,7 @@ impl App {
             }
         }
 
-        for d in dividers {
+        for d in &self.dividers {
             let (x, y, dw, dh) = match d.orientation {
                 Orientation::Horizontal => (
                     (d.rect.x + d.rect.w / 2.0).round().max(0.0) as usize,
