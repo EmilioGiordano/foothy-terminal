@@ -147,10 +147,6 @@ impl Renderer {
         self.bg = bg;
     }
 
-    pub fn background(&self) -> u32 {
-        self.bg
-    }
-
     /// Which cell a pixel lands on, plus which half of it (for selection).
     pub fn cell_at(
         &self,
