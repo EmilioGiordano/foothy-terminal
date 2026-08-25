@@ -162,7 +162,7 @@ function global:prompt {
   }
 
   $out = "@PATH_ON@" + $p + "@PATH_OFF@"
-  if ($b) { $out += ' ' + "@BRANCH_ON@" + $b + "@BRANCH_OFF@" }
+  if ($b) { $out += "@BRANCH_ON@" + $b + "@BRANCH_OFF@" }
 
   # The chip goes out as ordinary output and only the chevron is returned as the
   # prompt. A prompt PSReadLine believes is one line but that wraps after a

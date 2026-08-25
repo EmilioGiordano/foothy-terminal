@@ -56,13 +56,25 @@ pub(crate) fn coverage(c: char, w: usize, h: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// How far the ink stops short of the cell's outer edge, as a fraction of the
+/// cell width. Two pills are written side by side with no character between
+/// them, because a whole cell of separator reads as too much space; this is what
+/// keeps them from merging into one shape.
+const OUTER_INSET: f32 = 0.2;
+
 /// A cap fills its cell except for the two corners on its outer side, which are
-/// rounded off. The inner edge stays square so it meets the cell background of
-/// the pill body exactly; any gap there would show as a hairline.
+/// rounded off, and a thin margin beyond them. The inner edge stays square so it
+/// meets the cell background of the pill body exactly; a gap there would show as
+/// a hairline.
 fn in_cap(x: f32, y: f32, w: f32, h: f32, left: bool) -> bool {
     // Mirror the right cap so only one shape has to be reasoned about.
     let x = if left { x } else { w - x };
-    let r = (h / 3.0).min(w);
+    let inset = w * OUTER_INSET;
+    if x < inset {
+        return false;
+    }
+    let (x, w) = (x - inset, w - inset);
+    let r = (h / 5.0).min(w);
     if x >= r {
         return true;
     }
@@ -185,15 +197,33 @@ mod tests {
 
     #[test]
     fn the_caps_are_rounded_on_their_outer_corners() {
+        // The corners are pulled further in than the waist; that difference is
+        // the rounding, and comparing the two is what a fixed pixel cannot say.
         let left = coverage(PILL_LEFT, W, H).unwrap();
-        assert_eq!(at(&left, 0, 0), 0, "top left should be cut away");
-        assert_eq!(at(&left, 0, H - 1), 0, "bottom left should be cut away");
-        assert_eq!(at(&left, 0, H / 2), 255, "the middle should stay solid");
+        let first_solid = |y: usize| (0..W).find(|x| at(&left, *x, y) == 255);
+        let waist = first_solid(H / 2).expect("solid somewhere at mid height");
+        for corner in [0, H - 1] {
+            assert!(
+                first_solid(corner).is_none_or(|c| c > waist),
+                "row {corner} is not pulled in relative to the waist at {waist}"
+            );
+        }
+    }
 
-        let right = coverage(PILL_RIGHT, W, H).unwrap();
-        assert_eq!(at(&right, W - 1, 0), 0);
-        assert_eq!(at(&right, W - 1, H - 1), 0);
-        assert_eq!(at(&right, W - 1, H / 2), 255);
+    #[test]
+    fn the_caps_keep_a_margin_on_their_outer_side() {
+        // The two pills are written with no character between them, so without
+        // this margin they would touch and read as one shape.
+        for (c, outer) in [(PILL_LEFT, 0), (PILL_RIGHT, W - 1)] {
+            let cov = coverage(c, W, H).unwrap();
+            assert_eq!(at(&cov, outer, H / 2), 0, "{c:?} inks its outer edge");
+        }
+        let left = coverage(PILL_LEFT, W, H).unwrap();
+        let margin = (0..W).find(|x| at(&left, *x, H / 2) > 0).unwrap();
+        assert!(
+            (1..=3).contains(&margin),
+            "margin is {margin} px, off target"
+        );
     }
 
     #[test]
