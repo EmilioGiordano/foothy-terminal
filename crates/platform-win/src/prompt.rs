@@ -136,9 +136,13 @@ function global:__footBranch {
 function global:prompt {
   $e = [char]27
   $p = $PWD.Path
-  if ($PWD.Provider.Name -eq 'FileSystem' -and $HOME -and
-      $p.StartsWith($HOME, [System.StringComparison]::OrdinalIgnoreCase)) {
-    $p = '~' + $p.Substring($HOME.Length)
+  # The prefix has to end on a separator, or a sibling of home whose name merely
+  # starts with it -- giordano next to giord -- comes out as "~ano".
+  $h = $HOME
+  if ($h) { $h = $h.TrimEnd('\', '/') }
+  if ($PWD.Provider.Name -eq 'FileSystem' -and $h -and
+      ($p -eq $h -or $p.StartsWith($h + '\', [System.StringComparison]::OrdinalIgnoreCase))) {
+    $p = '~' + $p.Substring($h.Length)
   }
 
   # A prompt that throws leaves PowerShell showing a bare "PS>", so anything
