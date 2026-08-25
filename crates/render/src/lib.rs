@@ -62,6 +62,12 @@ fn build_palette() -> [u32; 256] {
     p
 }
 
+mod builtin;
+
+/// Codepoints the renderer draws itself when the font lacks them. Callers
+/// choosing glyphs can rely on these being drawable whatever font is loaded.
+pub use builtin::BUILTIN as SYNTHESISED_GLYPHS;
+
 struct Glyph {
     width: usize,
     height: usize,
@@ -270,10 +276,12 @@ impl Renderer {
         (x, y)
     }
 
-    /// False when the font has no glyph for `c` and would draw `.notdef` (tofu).
-    /// Coverage is not a usable signal here: `.notdef` is itself an inked box.
+    /// Whether `c` can be drawn at all, from the font or from [`builtin`].
+    ///
+    /// False means the font would draw `.notdef` (tofu). Coverage is not a
+    /// usable signal here: `.notdef` is itself an inked box.
     pub fn has_glyph(&self, c: char) -> bool {
-        self.font.lookup_glyph_index(c) != 0
+        self.font.lookup_glyph_index(c) != 0 || builtin::has(c)
     }
 
     pub fn grid_size(&self, width_px: usize, height_px: usize) -> TermSize {
@@ -286,7 +294,20 @@ impl Renderer {
     }
 
     fn glyph(&mut self, c: char) -> &Glyph {
+        let (cell_w, cell_h, baseline) = (self.cell_w, self.cell_h, self.baseline);
+        let font_has = self.font.lookup_glyph_index(c) != 0;
         self.glyphs.entry(c).or_insert_with(|| {
+            if !font_has && let Some(coverage) = builtin::coverage(c, cell_w, cell_h) {
+                // The blit offsets by `baseline - top`, so this lands the sprite
+                // on the cell origin and lets it fill the cell exactly.
+                return Glyph {
+                    width: cell_w,
+                    height: cell_h,
+                    left: 0,
+                    top: baseline,
+                    coverage,
+                };
+            }
             let (m, coverage) = self.font.rasterize(c, self.px);
             Glyph {
                 width: m.width,
