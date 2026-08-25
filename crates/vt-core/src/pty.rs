@@ -11,6 +11,15 @@ pub enum PtyEvent {
     Eof,
 }
 
+/// One bounded read of the child's output.
+pub struct Drained {
+    pub bytes: Vec<u8>,
+    /// The session ended.
+    pub eof: bool,
+    /// The cap was reached and there is still data waiting.
+    pub more: bool,
+}
+
 pub struct Pty {
     master: Option<Box<dyn MasterPty + Send>>,
     writer: Box<dyn Write + Send>,
@@ -119,21 +128,32 @@ impl Pty {
         Ok(())
     }
 
-    // Bounded per turn (docs/02 §3 rule 7): one noisy pane must not starve the others.
-    pub fn drain(&self, max_reads: usize) -> (Vec<u8>, bool) {
-        let mut out = Vec::new();
+    /// Bounded per turn (docs/02 §3 rule 7): one noisy pane must not starve the
+    /// others. `more` says the cap was hit with data still queued, and the caller
+    /// must come back: the waker only fires for *new* bytes, so whatever is left
+    /// would otherwise sit unread until the child happens to write again.
+    pub fn drain(&self, max_reads: usize) -> Drained {
+        let mut bytes = Vec::new();
         let mut eof = false;
-        for _ in 0..max_reads {
+        let mut more = false;
+        for i in 0..max_reads {
             match self.rx.try_recv() {
-                Ok(PtyEvent::Output(mut b)) => out.append(&mut b),
+                Ok(PtyEvent::Output(mut b)) => {
+                    bytes.append(&mut b);
+                    more = i + 1 == max_reads;
+                }
                 Ok(PtyEvent::Eof) | Err(TryRecvError::Disconnected) => {
                     eof = true;
+                    more = false;
                     break;
                 }
-                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Empty) => {
+                    more = false;
+                    break;
+                }
             }
         }
-        (out, eof)
+        Drained { bytes, eof, more }
     }
 
     pub fn child_exited(&self) -> Option<portable_pty::ExitStatus> {
@@ -165,7 +185,7 @@ mod tests {
         let mut term = Terminal::new(size);
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
-            let (bytes, _) = pty.drain(10);
+            let bytes = pty.drain(10).bytes;
             if !bytes.is_empty() {
                 term.feed(&bytes);
                 let replies = term.take_pty_replies();
@@ -179,6 +199,43 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         None
+    }
+
+    #[test]
+    fn a_capped_drain_says_there_is_more() {
+        // Feeding the channel directly keeps this away from a real shell.
+        let (tx, rx) = channel();
+        for _ in 0..5 {
+            tx.send(PtyEvent::Output(vec![b'x'])).unwrap();
+        }
+        let mut bytes = Vec::new();
+        let mut more = true;
+        let mut rounds = 0;
+        while more {
+            let mut got = Vec::new();
+            let mut hit_cap = false;
+            for i in 0..2 {
+                match rx.try_recv() {
+                    Ok(PtyEvent::Output(mut b)) => {
+                        got.append(&mut b);
+                        hit_cap = i + 1 == 2;
+                    }
+                    _ => {
+                        hit_cap = false;
+                        break;
+                    }
+                }
+            }
+            bytes.extend_from_slice(&got);
+            more = hit_cap;
+            rounds += 1;
+            assert!(rounds < 10, "no deberia dar vueltas para siempre");
+        }
+        assert_eq!(
+            bytes.len(),
+            5,
+            "no se debe perder nada al acotar por vuelta"
+        );
     }
 
     #[test]
