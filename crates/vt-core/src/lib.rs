@@ -431,7 +431,7 @@ mod tests {
             t.feed(format!("linea {i}\r\n").as_bytes());
         }
         t.scroll(Scroll::Delta(3));
-        // La fila 0 del viewport ahora es "linea 6".
+        // Viewport row 0 is now "linea 6".
         t.start_selection(0, 0, Side::Left, SelectionType::Simple);
         t.update_selection(0, 6, Side::Right);
         assert_eq!(t.selection_text().as_deref(), Some("linea 6"));
