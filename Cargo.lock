@@ -1230,6 +1230,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "input",
+ "layout",
  "portable-pty",
  "render",
  "softbuffer",

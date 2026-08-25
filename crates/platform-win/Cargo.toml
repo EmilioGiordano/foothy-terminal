@@ -13,6 +13,7 @@ path = "src/main.rs"
 vt-core = { path = "../vt-core" }
 render = { path = "../render" }
 input = { path = "../input" }
+layout = { path = "../layout" }
 portable-pty.workspace = true
 winit.workspace = true
 softbuffer.workspace = true
