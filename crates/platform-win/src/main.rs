@@ -44,6 +44,10 @@ const HEADER_TEXT_IDLE: u32 = 0x0078_8f99;
 const DIVIDER_COLOR: u32 = 0x0031_5a6d;
 const DROP_TINT: u32 = 0x004e_9ad6;
 const DROP_ALPHA: u8 = 110;
+const PREVIEW_FADE: Duration = Duration::from_millis(90);
+const PREVIEW_GLIDE: Duration = Duration::from_millis(90);
+/// Only ticks while the preview is still moving, so idle stays at zero.
+const PREVIEW_FRAME: Duration = Duration::from_millis(8);
 const CLOSE_HOVER: u32 = 0x00b3_4a4a;
 /// Preference order for the close button. Picked at runtime because a font that
 /// lacks the glyph draws tofu instead, and the fancier crosses are often absent.
@@ -149,6 +153,69 @@ fn arrow_direction(key: &WKey) -> Option<Direction> {
     }
 }
 
+fn ease_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
+fn lerp_rect(from: Rect, to: Rect, t: f32) -> Rect {
+    let at = |a: f32, b: f32| a + (b - a) * t;
+    Rect::new(
+        at(from.x, to.x),
+        at(from.y, to.y),
+        at(from.w, to.w),
+        at(from.h, to.h),
+    )
+}
+
+/// Where a carried pane would land. The rectangle slides to its new slot and
+/// the tint fades in rather than appearing at full strength, so brushing past a
+/// pane no longer flashes. Only the overlay animates: the split itself stays
+/// instant, because resizing a terminal means telling its shell about it.
+struct DropPreview {
+    target: (PaneId, DropZone),
+    from: Rect,
+    to: Rect,
+    /// Restarted on every retarget, for the slide.
+    moved: Instant,
+    /// Kept across retargets, so the tint fades in once per drag, not per zone.
+    shown: Instant,
+}
+
+impl DropPreview {
+    fn new(target: (PaneId, DropZone), rect: Rect) -> Self {
+        let now = Instant::now();
+        Self {
+            target,
+            from: rect,
+            to: rect,
+            moved: now,
+            shown: now,
+        }
+    }
+
+    fn retarget(&mut self, target: (PaneId, DropZone), rect: Rect) {
+        self.from = self.rect();
+        self.to = rect;
+        self.moved = Instant::now();
+        self.target = target;
+    }
+
+    fn rect(&self) -> Rect {
+        let t = self.moved.elapsed().div_duration_f32(PREVIEW_GLIDE);
+        lerp_rect(self.from, self.to, ease_out(t))
+    }
+
+    fn alpha(&self) -> u8 {
+        let t = self.shown.elapsed().div_duration_f32(PREVIEW_FADE);
+        (DROP_ALPHA as f32 * ease_out(t)).round() as u8
+    }
+
+    fn animating(&self) -> bool {
+        self.moved.elapsed() < PREVIEW_GLIDE || self.shown.elapsed() < PREVIEW_FADE
+    }
+}
+
 struct App {
     proxy: EventLoopProxy<()>,
     window: Option<Rc<Window>>,
@@ -170,7 +237,8 @@ struct App {
     dragging: Option<DividerId>,
     /// Pane being carried by its header, and where it would land.
     moving: Option<PaneId>,
-    drop_at: Option<(PaneId, DropZone, Rect)>,
+    preview: Option<DropPreview>,
+    last_frame: Instant,
     cursor_icon: CursorIcon,
     hover_close: Option<PaneId>,
     close_glyph: char,
@@ -218,7 +286,8 @@ impl App {
             dividers: Vec::new(),
             dragging: None,
             moving: None,
-            drop_at: None,
+            preview: None,
+            last_frame: Instant::now(),
             cursor_icon: CursorIcon::Default,
             hover_close: None,
             close_glyph,
@@ -556,7 +625,7 @@ impl App {
 
         let rects = self.rects.clone();
         let dividers = self.dividers.clone();
-        let preview = self.drop_at;
+        let preview = self.preview.as_ref().map(|p| (p.rect(), p.alpha()));
         let hover_close = self.hover_close;
         let close_glyph = self.close_glyph.to_string();
         let focus_glyph = self.focus_glyph;
@@ -672,17 +741,17 @@ impl App {
                 .fill_area(&mut buffer, w, h, (x, y, dw, dh), DIVIDER_COLOR);
         }
 
-        if let Some((_, _, preview)) = preview {
+        if let Some((rect, alpha)) = preview {
             let area = (
-                preview.x.round().max(0.0) as usize,
-                preview.y.round().max(0.0) as usize,
-                preview.w.round().max(0.0) as usize,
-                preview.h.round().max(0.0) as usize,
+                rect.x.round().max(0.0) as usize,
+                rect.y.round().max(0.0) as usize,
+                rect.w.round().max(0.0) as usize,
+                rect.h.round().max(0.0) as usize,
             );
             self.renderer
-                .tint_area(&mut buffer, w, h, area, DROP_TINT, DROP_ALPHA);
+                .tint_area(&mut buffer, w, h, area, DROP_TINT, alpha);
             self.renderer
-                .outline_area(&mut buffer, w, h, area, DROP_TINT);
+                .outline_area(&mut buffer, w, h, area, DROP_TINT, alpha);
         }
 
         let _ = buffer.present();
@@ -766,7 +835,7 @@ impl ApplicationHandler for App {
                 if !focused {
                     self.dragging = None;
                     self.moving = None;
-                    self.drop_at = None;
+                    self.preview = None;
                     self.selecting = false;
                     self.set_cursor(CursorIcon::Default);
                 }
@@ -899,9 +968,21 @@ impl ApplicationHandler for App {
                 // Carrying a pane by its header: keep showing where it would land.
                 if self.moving.is_some() {
                     let area = self.content();
-                    let next = self.panes.drop_target(position.x, position.y, area);
-                    if next.map(|(p, z, _)| (p, z)) != self.drop_at.map(|(p, z, _)| (p, z)) {
-                        self.drop_at = next;
+                    let current = self.preview.as_ref().map(|p| p.target);
+                    let next = self
+                        .panes
+                        .drop_target(position.x, position.y, area, current);
+                    if next.map(|(p, z, _)| (p, z)) != current {
+                        self.preview = match (next, self.preview.take()) {
+                            (Some((pane, zone, rect)), Some(mut p)) => {
+                                p.retarget((pane, zone), rect);
+                                Some(p)
+                            }
+                            (Some((pane, zone, rect)), None) => {
+                                Some(DropPreview::new((pane, zone), rect))
+                            }
+                            (None, _) => None,
+                        };
                         self.redraw_soon();
                     }
                     return;
@@ -975,7 +1056,7 @@ impl ApplicationHandler for App {
                     if let Some(id) = self.header_at(self.mouse.0, self.mouse.1) {
                         self.panes.focus = id;
                         self.moving = Some(id);
-                        self.drop_at = None;
+                        self.preview = None;
                         self.set_cursor(CursorIcon::Grabbing);
                         self.restart_blink();
                         self.redraw_soon();
@@ -1020,12 +1101,13 @@ impl ApplicationHandler for App {
                     self.dragging = None;
 
                     if let Some(pane) = self.moving.take() {
-                        if let Some((target, zone, _)) = self.drop_at.take()
+                        // The landing slot comes from the target, not from the
+                        // rectangle on screen, which may still be sliding.
+                        if let Some((target, zone)) = self.preview.take().map(|p| p.target)
                             && self.panes.move_pane(pane, target, zone)
                         {
                             self.relayout();
                         }
-                        self.drop_at = None;
                         self.set_cursor(CursorIcon::Default);
                         self.redraw_soon();
                     }
@@ -1092,6 +1174,18 @@ impl ApplicationHandler for App {
             return;
         }
 
+        if self.preview.as_ref().is_some_and(DropPreview::animating) {
+            let now = Instant::now();
+            if now >= self.last_frame + PREVIEW_FRAME {
+                self.last_frame = now;
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            event_loop.set_control_flow(ControlFlow::WaitUntil(self.last_frame + PREVIEW_FRAME));
+            return;
+        }
+
         // Without a blinking cursor nothing is scheduled and the loop sleeps
         // until the next real event, which keeps idle CPU at zero.
         let Some(period) = self.blink.filter(|_| self.focused) else {
@@ -1123,6 +1217,74 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_preview_starts_where_it_is_and_ends_where_it_goes() {
+        let from = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let to = Rect::new(50.0, 20.0, 50.0, 80.0);
+
+        let start = lerp_rect(from, to, ease_out(0.0));
+        assert_eq!(
+            (start.x, start.y, start.w, start.h),
+            (0.0, 0.0, 100.0, 100.0)
+        );
+
+        let end = lerp_rect(from, to, ease_out(1.0));
+        assert_eq!((end.x, end.y, end.w, end.h), (50.0, 20.0, 50.0, 80.0));
+    }
+
+    #[test]
+    fn the_easing_never_goes_backwards_and_never_overshoots() {
+        // Overshoot would put the preview outside the pane it is previewing.
+        let mut previous = 0.0;
+        for step in 0..=20 {
+            let t = ease_out(step as f32 / 20.0);
+            assert!(t >= previous, "eased backwards at {step}");
+            assert!((0.0..=1.0).contains(&t), "out of range at {step}: {t}");
+            previous = t;
+        }
+        // Past the end it saturates rather than running away.
+        assert_eq!(ease_out(4.0), 1.0);
+        assert_eq!(ease_out(-1.0), 0.0);
+    }
+
+    #[test]
+    fn a_fresh_preview_is_still_and_only_fades() {
+        let rect = Rect::new(10.0, 10.0, 40.0, 40.0);
+        let p = DropPreview::new((0, DropZone::Left), rect);
+        let now = p.rect();
+        assert_eq!((now.x, now.y, now.w, now.h), (10.0, 10.0, 40.0, 40.0));
+        assert!(p.alpha() < DROP_ALPHA, "the tint must ramp, not appear");
+        assert!(p.animating());
+    }
+
+    #[test]
+    fn retargeting_slides_from_where_the_preview_already_is() {
+        let mut p = DropPreview::new((0, DropZone::Left), Rect::new(0.0, 0.0, 50.0, 100.0));
+        let shown = p.shown;
+        p.retarget((0, DropZone::Right), Rect::new(50.0, 0.0, 50.0, 100.0));
+
+        // It leaves from the old slot, so the move reads as one rectangle.
+        let now = p.rect();
+        assert!(now.x < 50.0, "jumped straight to the new slot: {}", now.x);
+        // And the fade does not restart, or every zone change would blink.
+        assert_eq!(p.shown, shown);
+    }
+
+    #[test]
+    fn the_preview_stops_animating_and_the_loop_can_sleep_again() {
+        // This is what keeps idle at 0%: once it settles, about_to_wait stops
+        // scheduling frames. A preview that never latches would tick forever.
+        let mut p = DropPreview::new((0, DropZone::Left), Rect::new(0.0, 0.0, 50.0, 50.0));
+        p.retarget((0, DropZone::Right), Rect::new(50.0, 0.0, 50.0, 50.0));
+
+        std::thread::sleep(PREVIEW_GLIDE.max(PREVIEW_FADE) + Duration::from_millis(20));
+
+        assert!(!p.animating());
+        assert_eq!(p.alpha(), DROP_ALPHA);
+        let settled = p.rect();
+        assert_eq!((settled.x, settled.w), (50.0, 50.0));
+    }
 
     #[test]
     fn safe_paste_asks_nothing() {

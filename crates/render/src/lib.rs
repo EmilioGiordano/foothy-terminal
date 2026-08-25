@@ -198,7 +198,9 @@ impl Renderer {
         }
     }
 
-    /// An outline, one pixel thick.
+    /// An outline, one pixel thick, blended like [`Self::tint_area`] so both
+    /// halves of the drop preview fade together.
+    #[allow(clippy::too_many_arguments)]
     pub fn outline_area(
         &self,
         buf: &mut [u32],
@@ -206,15 +208,16 @@ impl Renderer {
         height: usize,
         area: (usize, usize, usize, usize),
         color: u32,
+        alpha: u8,
     ) {
         let (x, y, w, h) = area;
         if w == 0 || h == 0 {
             return;
         }
-        fill_rect(buf, width, height, x, y, w, 1, color);
-        fill_rect(buf, width, height, x, y + h - 1, w, 1, color);
-        fill_rect(buf, width, height, x, y, 1, h, color);
-        fill_rect(buf, width, height, x + w - 1, y, 1, h, color);
+        self.tint_area(buf, width, height, (x, y, w, 1), color, alpha);
+        self.tint_area(buf, width, height, (x, y + h - 1, w, 1), color, alpha);
+        self.tint_area(buf, width, height, (x, y, 1, h), color, alpha);
+        self.tint_area(buf, width, height, (x + w - 1, y, 1, h), color, alpha);
     }
 
     /// A filled rectangle, for headers, dividers and focus borders.
