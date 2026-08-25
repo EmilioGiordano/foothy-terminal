@@ -147,6 +147,103 @@ impl Renderer {
         self.bg = bg;
     }
 
+    pub fn header_height(&self) -> usize {
+        self.cell_h
+    }
+
+    /// Draws `text` clipped to `(x, y, w)`, and returns where it ended.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_text(
+        &mut self,
+        buf: &mut [u32],
+        width: usize,
+        height: usize,
+        x: usize,
+        y: usize,
+        max_w: usize,
+        text: &str,
+        fg: u32,
+        bg: u32,
+    ) -> usize {
+        let mut pen = x;
+        for ch in text.chars() {
+            if pen + self.cell_w > x + max_w || pen + self.cell_w > width {
+                break;
+            }
+            if ch != ' ' {
+                self.blit(buf, width, height, pen, y, ch, fg, bg);
+            }
+            pen += self.cell_w;
+        }
+        pen
+    }
+
+    /// Blends `color` over what is already there. Used for the drop preview,
+    /// which has to show the layout underneath it to be any use.
+    pub fn tint_area(
+        &self,
+        buf: &mut [u32],
+        width: usize,
+        height: usize,
+        area: (usize, usize, usize, usize),
+        color: u32,
+        alpha: u8,
+    ) {
+        let (x, y, w, h) = area;
+        for row in y..(y + h).min(height) {
+            let base = row * width;
+            for col in x..(x + w).min(width) {
+                buf[base + col] = blend(buf[base + col], color, alpha);
+            }
+        }
+    }
+
+    /// An outline, one pixel thick, blended like [`Self::tint_area`] so both
+    /// halves of the drop preview fade together.
+    #[allow(clippy::too_many_arguments)]
+    pub fn outline_area(
+        &self,
+        buf: &mut [u32],
+        width: usize,
+        height: usize,
+        area: (usize, usize, usize, usize),
+        color: u32,
+        alpha: u8,
+    ) {
+        let (x, y, w, h) = area;
+        if w == 0 || h == 0 {
+            return;
+        }
+        self.tint_area(buf, width, height, (x, y, w, 1), color, alpha);
+        self.tint_area(buf, width, height, (x, y + h - 1, w, 1), color, alpha);
+        // Blending is not idempotent, so the sides stop short of the corners the
+        // rows above already covered.
+        if h > 2 {
+            self.tint_area(buf, width, height, (x, y + 1, 1, h - 2), color, alpha);
+            self.tint_area(
+                buf,
+                width,
+                height,
+                (x + w - 1, y + 1, 1, h - 2),
+                color,
+                alpha,
+            );
+        }
+    }
+
+    /// A filled rectangle, for headers, dividers and focus borders.
+    pub fn fill_area(
+        &self,
+        buf: &mut [u32],
+        width: usize,
+        height: usize,
+        area: (usize, usize, usize, usize),
+        color: u32,
+    ) {
+        let (x, y, w, h) = area;
+        fill_rect(buf, width, height, x, y, w, h, color);
+    }
+
     /// Which cell a pixel lands on, plus which half of it (for selection).
     pub fn cell_at(
         &self,
@@ -214,6 +311,12 @@ impl Renderer {
         }
     }
 
+    /// Clears the whole buffer to the background colour.
+    pub fn clear(&self, buf: &mut [u32]) {
+        buf.fill(self.bg);
+    }
+
+    /// One pane filling the whole buffer.
     pub fn draw(
         &mut self,
         term: &Terminal,
@@ -222,8 +325,24 @@ impl Renderer {
         height: usize,
         cursor_look: CursorLook,
     ) {
-        buf.fill(self.bg);
+        self.clear(buf);
+        self.draw_into(term, buf, width, height, (0, 0, width, height), cursor_look);
+    }
 
+    /// One pane inside `area` = `(x, y, w, h)` of the buffer. The caller clears
+    /// first: with several panes the buffer is shared and each one only owns its
+    /// rectangle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_into(
+        &mut self,
+        term: &Terminal,
+        buf: &mut [u32],
+        width: usize,
+        height: usize,
+        area: (usize, usize, usize, usize),
+        cursor_look: CursorLook,
+    ) {
+        let (ax, ay, aw, ah) = area;
         let offset = term.display_offset() as i32;
         let (cols, rows, cursor) = {
             let t = term.term();
@@ -241,16 +360,18 @@ impl Renderer {
 
         // Hoisted: resolving it per cell re-runs a word/line search each time.
         let selection = term.selection_range();
-        let (ox, oy) = self.origin(width, height, TermSize::new(cols, rows));
+        let (rx, ry) = self.origin(aw, ah, TermSize::new(cols, rows));
+        let (ox, oy) = (ax + rx, ay + ry);
+        let (right, bottom) = ((ax + aw).min(width), (ay + ah).min(height));
 
         for row in 0..rows {
             let y0 = oy + row * self.cell_h;
-            if y0 >= height {
+            if y0 + self.cell_h > bottom {
                 break;
             }
             for col in 0..cols {
                 let x0 = ox + col * self.cell_w;
-                if x0 >= width {
+                if x0 + self.cell_w > right {
                     break;
                 }
 
@@ -521,7 +642,7 @@ mod tests {
         let mut buf = vec![0u32; w * h];
         r.draw(&term, &mut buf, w, h, CursorLook::Beam);
 
-        // El cursor invierte su celda, asi que solo se mira fuera de ella.
+        // The cursor inverts its own cell, so only look outside it.
         let dirty = (ch..h).any(|y| (0..w).any(|x| buf[y * w + x] != DEFAULT_BG));
         assert!(
             !dirty,
@@ -553,7 +674,7 @@ mod tests {
         let term = Terminal::new(TermSize::new(4, 2));
         let mut buf = vec![0u32; w * h];
         r.draw(&term, &mut buf, w, h, look);
-        // Columnas de la celda 0 con algun pixel distinto del fondo.
+        // Columns of cell 0 holding any pixel other than the background.
         (0..cw)
             .filter(|&x| (0..ch).any(|y| buf[y * w + x] != DEFAULT_BG))
             .count()
@@ -625,7 +746,7 @@ mod tests {
         let mut r = renderer();
         r.set_font_size(1000.0);
         assert_eq!(r.font_size(), MAX_FONT_PX);
-        // Ya esta en el tope: pedir mas no cambia nada.
+        // Already at the ceiling: asking for more changes nothing.
         assert!(!r.set_font_size(1000.0));
 
         r.set_font_size(0.1);
@@ -696,6 +817,113 @@ mod tests {
             lit(1),
             "la mitad derecha se borro: el espaciador la repinto"
         );
+    }
+
+    #[test]
+    fn the_outline_blends_every_border_pixel_exactly_once() {
+        // Blending is not idempotent: an edge written twice comes out brighter,
+        // so the four corners would read as dots.
+        let r = renderer();
+        let (width, height) = (40usize, 30usize);
+        let (x, y, w, h) = (5usize, 4usize, 20usize, 15usize);
+        let mut buf = vec![0u32; width * height];
+        r.clear(&mut buf);
+        r.outline_area(&mut buf, width, height, (x, y, w, h), 0x00ff_ffff, 110);
+
+        let corner = buf[y * width + x];
+        assert_eq!(buf[y * width + x + w / 2], corner, "top edge");
+        assert_eq!(buf[(y + h - 1) * width + x + w / 2], corner, "bottom edge");
+        assert_eq!(buf[(y + h / 2) * width + x], corner, "left edge");
+        assert_eq!(buf[(y + h / 2) * width + x + w - 1], corner, "right edge");
+        assert_eq!(buf[y * width + x + w - 1], corner, "top right corner");
+        assert_eq!(buf[(y + h - 1) * width + x], corner, "bottom left corner");
+    }
+
+    #[test]
+    fn the_outline_survives_a_rectangle_too_thin_to_have_an_inside() {
+        // A nearly collapsed pane previews as a one pixel band.
+        let r = renderer();
+        let mut buf = vec![0u32; 40 * 30];
+        r.clear(&mut buf);
+        r.outline_area(&mut buf, 40, 30, (5, 4, 20, 1), 0x00ff_ffff, 110);
+        r.outline_area(&mut buf, 40, 30, (5, 4, 1, 15), 0x00ff_ffff, 110);
+        r.outline_area(&mut buf, 40, 30, (5, 4, 2, 2), 0x00ff_ffff, 110);
+    }
+
+    #[test]
+    fn draw_into_never_paints_outside_its_area() {
+        // The whole point of draw_into: a pane owns its rectangle and nothing else.
+        let mut r = renderer();
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 20, ch * 10);
+        let area = (cw * 4, ch * 2, cw * 8, ch * 4);
+
+        let mut term = Terminal::new(TermSize::new(40, 20));
+        for i in 0..20 {
+            term.feed(format!("linea {i} llena de texto para desbordar\r\n").as_bytes());
+        }
+
+        let mut buf = vec![0u32; w * h];
+        r.clear(&mut buf);
+        r.draw_into(&term, &mut buf, w, h, area, CursorLook::Block);
+
+        let (ax, ay, aw, ah) = area;
+        for y in 0..h {
+            for x in 0..w {
+                let inside = x >= ax && x < ax + aw && y >= ay && y < ay + ah;
+                if !inside {
+                    assert_eq!(
+                        buf[y * w + x],
+                        DEFAULT_BG,
+                        "pixel ({x},{y}) painted outside the area {area:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn draw_into_actually_paints_inside() {
+        let mut r = renderer();
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 20, ch * 10);
+        let area = (cw * 4, ch * 2, cw * 8, ch * 4);
+
+        let mut term = Terminal::new(TermSize::new(8, 4));
+        term.feed(b"XXXX");
+
+        let mut buf = vec![0u32; w * h];
+        r.clear(&mut buf);
+        r.draw_into(&term, &mut buf, w, h, area, CursorLook::Beam);
+
+        let (ax, ay, aw, ah) = area;
+        let painted = (ay..ay + ah).any(|y| (ax..ax + aw).any(|x| buf[y * w + x] != DEFAULT_BG));
+        assert!(painted, "nothing was drawn inside the area");
+    }
+
+    #[test]
+    fn draw_text_stops_at_max_width() {
+        let mut r = renderer();
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 20, ch * 3);
+        let mut buf = vec![0u32; w * h];
+        r.clear(&mut buf);
+
+        let limit = cw * 3;
+        r.draw_text(
+            &mut buf,
+            w,
+            h,
+            0,
+            0,
+            limit,
+            "XXXXXXXXXX",
+            DEFAULT_FG,
+            DEFAULT_BG,
+        );
+
+        let beyond = (0..ch).any(|y| (limit..w).any(|x| buf[y * w + x] != DEFAULT_BG));
+        assert!(!beyond, "draw_text wrote past max_w");
     }
 
     #[test]

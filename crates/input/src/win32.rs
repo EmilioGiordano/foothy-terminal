@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn ctrl_backspace_carries_the_modifier() {
         let ev = KeyEvent::down(vk::BACK, 0, Mods::CTRL);
-        // Cs = 8 = LEFT_CTRL_PRESSED. Esto es lo que el flujo VT no puede expresar.
+        // Cs = 8 = LEFT_CTRL_PRESSED, which the VT stream cannot express at all.
         assert_eq!(encode(&ev), b"\x1b[8;0;0;1;8;1_");
     }
 

@@ -6,6 +6,31 @@
 
 use std::collections::HashMap;
 
+/// The divider under a point, if any.
+///
+/// Hit areas overlap where an inner branch meets an outer one; the smaller
+/// rectangle wins because it is the more specific boundary the eye sees. Equal
+/// areas fall back to the id, so the cursor icon and the click that follows it
+/// can never pick different dividers.
+pub fn divider_at(dividers: &[Divider], x: f32, y: f32) -> Option<Divider> {
+    dividers
+        .iter()
+        .copied()
+        .filter(|d| x >= d.rect.x && x <= d.rect.right() && y >= d.rect.y && y <= d.rect.bottom())
+        .min_by(|a, b| {
+            let area_of = |d: &Divider| d.rect.w * d.rect.h;
+            area_of(a)
+                .partial_cmp(&area_of(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| (a.id.branch, a.id.after).cmp(&(b.id.branch, b.id.after)))
+        })
+}
+
+/// How much better a zone has to be before the preview leaves the one it is
+/// already showing. The four zones meet at the centre of a pane, so without a
+/// dead band a still hand flips the preview between them.
+const ZONE_HYSTERESIS: f32 = 0.06;
+
 pub type PaneId = u64;
 type NodeId = usize;
 
@@ -32,6 +57,47 @@ impl Direction {
             Direction::Up | Direction::Down => Orientation::Vertical,
         }
     }
+}
+
+/// Which side of a pane a dragged pane would land on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropZone {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl DropZone {
+    fn orientation(self) -> Orientation {
+        match self {
+            DropZone::Left | DropZone::Right => Orientation::Horizontal,
+            DropZone::Top | DropZone::Bottom => Orientation::Vertical,
+        }
+    }
+
+    /// Whether the arriving pane goes before the target in its branch.
+    fn before(self) -> bool {
+        matches!(self, DropZone::Left | DropZone::Top)
+    }
+}
+
+/// Identifies the gap between two adjacent children of one branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DividerId {
+    branch: usize,
+    /// The divider sits after this child.
+    after: usize,
+}
+
+/// A draggable boundary between two panes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Divider {
+    pub id: DividerId,
+    /// Hit target, already widened to `thickness`.
+    pub rect: Rect,
+    /// The axis it slides along: `Horizontal` moves left and right.
+    pub orientation: Orientation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -151,44 +217,20 @@ impl Tree {
     /// pane joins that branch instead of nesting a new one; otherwise every
     /// split would deepen the tree and the ratios would stop being comparable.
     pub fn split(&mut self, pane: PaneId, orientation: Orientation) -> Option<PaneId> {
+        let zone = match orientation {
+            Orientation::Horizontal => DropZone::Right,
+            Orientation::Vertical => DropZone::Bottom,
+        };
+        self.split_towards(pane, zone)
+    }
+
+    /// Splits `pane`, putting the new one on the side `zone` names. The new pane
+    /// takes half of the one it came from.
+    pub fn split_towards(&mut self, pane: PaneId, zone: DropZone) -> Option<PaneId> {
         let node = self.find(pane)?;
         let new_pane = self.next_pane;
         self.next_pane += 1;
-
-        let parent = self.nodes[node].parent;
-        let same_axis = parent.is_some_and(|p| {
-            matches!(&self.nodes[p].kind, Kind::Branch { orientation: o, .. } if *o == orientation)
-        });
-
-        if same_axis {
-            let parent = parent.unwrap();
-            let leaf = self.alloc(Node {
-                parent: Some(parent),
-                kind: Kind::Leaf(new_pane),
-            });
-            if let Kind::Branch { children, flex, .. } = &mut self.nodes[parent].kind {
-                let at = children.iter().position(|&c| c == node).unwrap();
-                // The new pane takes half of the one it was split from.
-                let half = flex[at] / 2.0;
-                flex[at] = half;
-                flex.insert(at + 1, half);
-                children.insert(at + 1, leaf);
-            }
-        } else {
-            let old_leaf = self.alloc(Node {
-                parent: Some(node),
-                kind: self.nodes[node].kind.clone(),
-            });
-            let new_leaf = self.alloc(Node {
-                parent: Some(node),
-                kind: Kind::Leaf(new_pane),
-            });
-            self.nodes[node].kind = Kind::Branch {
-                orientation,
-                children: vec![old_leaf, new_leaf],
-                flex: vec![0.5, 0.5],
-            };
-        }
+        self.insert_beside(node, new_pane, zone);
         Some(new_pane)
     }
 
@@ -197,43 +239,7 @@ impl Tree {
         if self.len() <= 1 {
             return false;
         }
-        let Some(node) = self.find(pane) else {
-            return false;
-        };
-        let Some(parent) = self.nodes[node].parent else {
-            return false;
-        };
-
-        let remaining = if let Kind::Branch { children, flex, .. } = &mut self.nodes[parent].kind {
-            let at = children.iter().position(|&c| c == node).unwrap();
-            children.remove(at);
-            let freed = flex.remove(at);
-            // Hand the freed space to the siblings, keeping the total at 1.0.
-            let total: f32 = flex.iter().sum();
-            if total > 0.0 {
-                for f in flex.iter_mut() {
-                    *f += freed * (*f / total);
-                }
-            }
-            children.clone()
-        } else {
-            return false;
-        };
-        self.vacant.push(node);
-
-        // A branch with a single child is redundant: pull the child up.
-        if remaining.len() == 1 {
-            let only = remaining[0];
-            let kind = self.nodes[only].kind.clone();
-            self.nodes[parent].kind = kind;
-            self.vacant.push(only);
-            if let Kind::Branch { children, .. } = &self.nodes[parent].kind.clone() {
-                for &c in children {
-                    self.nodes[c].parent = Some(parent);
-                }
-            }
-        }
-        true
+        self.detach(pane)
     }
 
     /// Grows `pane` by `delta` (a fraction of its branch) at its siblings' cost.
@@ -277,6 +283,276 @@ impl Tree {
         out
     }
 
+    /// Rectangles of every node, branches included: dragging needs the branch's
+    /// extent to turn a pixel delta into a flex fraction.
+    fn node_rects(&self, area: Rect) -> HashMap<NodeId, Rect> {
+        let mut out = HashMap::new();
+        self.place_nodes(self.root, area, &mut out);
+        out
+    }
+
+    fn place_nodes(&self, node: NodeId, area: Rect, out: &mut HashMap<NodeId, Rect>) {
+        out.insert(node, area);
+        if let Kind::Branch {
+            orientation,
+            children,
+            flex,
+        } = &self.nodes[node].kind
+        {
+            let mut offset = 0.0;
+            for (i, &child) in children.iter().enumerate() {
+                let last = i == children.len() - 1;
+                let rect = child_rect(area, *orientation, flex[i], offset, last);
+                offset += span_of(rect, *orientation);
+                self.place_nodes(child, rect, out);
+            }
+        }
+    }
+
+    /// Where a pane dropped at this point would land, and the rectangle to
+    /// preview. The nearest edge of the pane under the cursor wins.
+    ///
+    /// `current` is the zone already on screen, if any; it keeps its slot unless
+    /// another beats it by [`ZONE_HYSTERESIS`].
+    pub fn drop_target(
+        &self,
+        x: f32,
+        y: f32,
+        area: Rect,
+        current: Option<(PaneId, DropZone)>,
+    ) -> Option<(PaneId, DropZone, Rect)> {
+        let rects = self.layout(area);
+        let (&pane, &r) = rects
+            .iter()
+            .find(|(_, r)| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)?;
+        if r.w <= 0.0 || r.h <= 0.0 {
+            return None;
+        }
+
+        let distance = |zone: DropZone| match zone {
+            DropZone::Left => (x - r.x) / r.w,
+            DropZone::Right => 1.0 - (x - r.x) / r.w,
+            DropZone::Top => (y - r.y) / r.h,
+            DropZone::Bottom => 1.0 - (y - r.y) / r.h,
+        };
+
+        let mut zone = DropZone::Left;
+        let mut best = distance(DropZone::Left);
+        for candidate in [DropZone::Right, DropZone::Top, DropZone::Bottom] {
+            let d = distance(candidate);
+            if d < best {
+                best = d;
+                zone = candidate;
+            }
+        }
+
+        if let Some((held_pane, held)) = current
+            && held_pane == pane
+            && distance(held) <= best + ZONE_HYSTERESIS
+        {
+            zone = held;
+        }
+
+        let preview = match zone {
+            DropZone::Left => Rect::new(r.x, r.y, r.w / 2.0, r.h),
+            DropZone::Right => Rect::new(r.x + r.w / 2.0, r.y, r.w / 2.0, r.h),
+            DropZone::Top => Rect::new(r.x, r.y, r.w, r.h / 2.0),
+            DropZone::Bottom => Rect::new(r.x, r.y + r.h / 2.0, r.w, r.h / 2.0),
+        };
+        Some((pane, zone, preview))
+    }
+
+    /// Moves `pane` next to `target`. The pane keeps its identity, so whatever
+    /// terminal it holds moves with it.
+    pub fn move_pane(&mut self, pane: PaneId, target: PaneId, zone: DropZone) -> bool {
+        if pane == target || self.find(pane).is_none() || self.find(target).is_none() {
+            return false;
+        }
+        if !self.detach(pane) {
+            return false;
+        }
+        // Detaching may have collapsed a branch, so the target is looked up again.
+        let Some(target_node) = self.find(target) else {
+            return false;
+        };
+        self.insert_beside(target_node, pane, zone);
+        true
+    }
+
+    /// Removes a leaf without touching the pane's identity, collapsing a branch
+    /// left with a single child.
+    fn detach(&mut self, pane: PaneId) -> bool {
+        let Some(node) = self.find(pane) else {
+            return false;
+        };
+        let Some(parent) = self.nodes[node].parent else {
+            return false;
+        };
+        let remaining = if let Kind::Branch { children, flex, .. } = &mut self.nodes[parent].kind {
+            let at = children.iter().position(|&c| c == node).unwrap();
+            children.remove(at);
+            let freed = flex.remove(at);
+            let total: f32 = flex.iter().sum();
+            if total > 0.0 {
+                for f in flex.iter_mut() {
+                    *f += freed * (*f / total);
+                }
+            }
+            children.clone()
+        } else {
+            return false;
+        };
+        self.vacant.push(node);
+
+        if remaining.len() == 1 {
+            let only = remaining[0];
+            let kind = self.nodes[only].kind.clone();
+            self.nodes[parent].kind = kind;
+            self.vacant.push(only);
+            if let Kind::Branch { children, .. } = &self.nodes[parent].kind.clone() {
+                for &c in children {
+                    self.nodes[c].parent = Some(parent);
+                }
+            }
+        }
+        true
+    }
+
+    fn insert_beside(&mut self, target_node: NodeId, pane: PaneId, zone: DropZone) {
+        let orientation = zone.orientation();
+        let parent = self.nodes[target_node].parent;
+        let same_axis = parent.is_some_and(|p| {
+            matches!(&self.nodes[p].kind, Kind::Branch { orientation: o, .. } if *o == orientation)
+        });
+
+        if same_axis {
+            let parent = parent.unwrap();
+            let leaf = self.alloc(Node {
+                parent: Some(parent),
+                kind: Kind::Leaf(pane),
+            });
+            if let Kind::Branch { children, flex, .. } = &mut self.nodes[parent].kind {
+                let at = children.iter().position(|&c| c == target_node).unwrap();
+                let half = flex[at] / 2.0;
+                flex[at] = half;
+                let slot = if zone.before() { at } else { at + 1 };
+                flex.insert(slot, half);
+                children.insert(slot, leaf);
+            }
+        } else {
+            let existing = self.alloc(Node {
+                parent: Some(target_node),
+                kind: self.nodes[target_node].kind.clone(),
+            });
+            let arriving = self.alloc(Node {
+                parent: Some(target_node),
+                kind: Kind::Leaf(pane),
+            });
+            let children = if zone.before() {
+                vec![arriving, existing]
+            } else {
+                vec![existing, arriving]
+            };
+            self.nodes[target_node].kind = Kind::Branch {
+                orientation,
+                children,
+                flex: vec![0.5, 0.5],
+            };
+        }
+    }
+
+    /// Every draggable boundary, as hit targets `thickness` pixels wide.
+    pub fn dividers(&self, area: Rect, thickness: f32) -> Vec<Divider> {
+        let rects = self.node_rects(area);
+        let half = thickness / 2.0;
+        let mut out = Vec::new();
+
+        for (node, node_rect) in &rects {
+            let Kind::Branch {
+                orientation,
+                children,
+                flex,
+            } = &self.nodes[*node].kind
+            else {
+                continue;
+            };
+            let mut offset = 0.0;
+            // Every child but the last: the last one has no boundary after it.
+            for (i, share) in flex.iter().enumerate().take(children.len() - 1) {
+                let rect = child_rect(*node_rect, *orientation, *share, offset, false);
+                offset += span_of(rect, *orientation);
+                let hit = match orientation {
+                    Orientation::Horizontal => Rect::new(
+                        node_rect.x + offset - half,
+                        node_rect.y,
+                        thickness,
+                        node_rect.h,
+                    ),
+                    Orientation::Vertical => Rect::new(
+                        node_rect.x,
+                        node_rect.y + offset - half,
+                        node_rect.w,
+                        thickness,
+                    ),
+                };
+                out.push(Divider {
+                    id: DividerId {
+                        branch: *node,
+                        after: i,
+                    },
+                    rect: hit,
+                    orientation: *orientation,
+                });
+            }
+        }
+        // node_rects is a HashMap, so iteration order changes between calls.
+        // Without this the same point can grab different dividers on different
+        // frames, and the cursor icon disagrees with what the click grabs.
+        out.sort_by_key(|d| (d.id.branch, d.id.after));
+        out
+    }
+
+    /// The divider under a point, if any. Callers holding a cached set should
+    /// use [`divider_at`] directly instead of rebuilding the layout.
+    pub fn divider_at(&self, x: f32, y: f32, area: Rect, thickness: f32) -> Option<Divider> {
+        divider_at(&self.dividers(area, thickness), x, y)
+    }
+
+    /// Moves one boundary by `delta` pixels.
+    ///
+    /// Unlike [`Tree::resize`], the space comes from the neighbour across that
+    /// boundary alone; the rest of the branch stays put, which is what dragging
+    /// a divider looks like.
+    pub fn drag_divider(&mut self, id: DividerId, delta: f32, area: Rect) -> bool {
+        let Some(branch_rect) = self.node_rects(area).get(&id.branch).copied() else {
+            return false;
+        };
+        let Kind::Branch {
+            orientation, flex, ..
+        } = &mut self.nodes[id.branch].kind
+        else {
+            return false;
+        };
+        if id.after + 1 >= flex.len() {
+            return false;
+        }
+        let extent = span_of(branch_rect, *orientation);
+        if extent <= 0.0 {
+            return false;
+        }
+
+        const MIN: f32 = 0.05;
+        let (a, b) = (id.after, id.after + 1);
+        // Clamped so neither neighbour is squeezed out of existence.
+        let applied = (delta / extent).max(MIN - flex[a]).min(flex[b] - MIN);
+        if applied.abs() < f32::EPSILON {
+            return false;
+        }
+        flex[a] += applied;
+        flex[b] -= applied;
+        true
+    }
+
     fn place(&self, node: NodeId, area: Rect, out: &mut HashMap<PaneId, Rect>) {
         match &self.nodes[node].kind {
             Kind::Leaf(pane) => {
@@ -289,31 +565,9 @@ impl Tree {
             } => {
                 let mut offset = 0.0;
                 for (i, &child) in children.iter().enumerate() {
-                    let share = flex[i];
-                    // The last child absorbs the rounding, so the area is exactly filled.
                     let last = i == children.len() - 1;
-                    let rect = match orientation {
-                        Orientation::Horizontal => {
-                            let w = if last {
-                                area.w - offset
-                            } else {
-                                area.w * share
-                            };
-                            Rect::new(area.x + offset, area.y, w, area.h)
-                        }
-                        Orientation::Vertical => {
-                            let h = if last {
-                                area.h - offset
-                            } else {
-                                area.h * share
-                            };
-                            Rect::new(area.x, area.y + offset, area.w, h)
-                        }
-                    };
-                    offset += match orientation {
-                        Orientation::Horizontal => rect.w,
-                        Orientation::Vertical => rect.h,
-                    };
+                    let rect = child_rect(area, *orientation, flex[i], offset, last);
+                    offset += span_of(rect, *orientation);
                     self.place(child, rect, out);
                 }
             }
@@ -375,6 +629,35 @@ impl Tree {
             }
         }
         best.map(|(id, _, _)| id)
+    }
+}
+
+fn span_of(rect: Rect, orientation: Orientation) -> f32 {
+    match orientation {
+        Orientation::Horizontal => rect.w,
+        Orientation::Vertical => rect.h,
+    }
+}
+
+/// The last child absorbs the rounding, so the area is exactly filled.
+fn child_rect(area: Rect, orientation: Orientation, share: f32, offset: f32, last: bool) -> Rect {
+    match orientation {
+        Orientation::Horizontal => {
+            let w = if last {
+                area.w - offset
+            } else {
+                area.w * share
+            };
+            Rect::new(area.x + offset, area.y, w, area.h)
+        }
+        Orientation::Vertical => {
+            let h = if last {
+                area.h - offset
+            } else {
+                area.h * share
+            };
+            Rect::new(area.x, area.y + offset, area.w, h)
+        }
     }
 }
 
@@ -510,7 +793,333 @@ mod tests {
         assert!(l[&b].w > 1.0, "el hermano quedo en {}", l[&b].w);
     }
 
-    // --- navegacion direccional: la parte que Warp marca como dificil ---
+    #[test]
+    fn splitting_towards_a_side_puts_the_new_pane_there() {
+        for (zone, expect_before) in [
+            (DropZone::Left, true),
+            (DropZone::Right, false),
+            (DropZone::Top, true),
+            (DropZone::Bottom, false),
+        ] {
+            let mut t = Tree::new();
+            let new = t.split_towards(0, zone).unwrap();
+            let l = t.layout(AREA);
+            let (old, fresh) = (l[&0], l[&new]);
+            match zone {
+                DropZone::Left | DropZone::Right => {
+                    assert_close(old.w, 50.0);
+                    assert_close(fresh.w, 50.0);
+                    if expect_before {
+                        assert!(fresh.x < old.x, "{zone:?}: should land before");
+                    } else {
+                        assert!(fresh.x > old.x, "{zone:?}: should land after");
+                    }
+                }
+                DropZone::Top | DropZone::Bottom => {
+                    assert_close(old.h, 50.0);
+                    assert_close(fresh.h, 50.0);
+                    if expect_before {
+                        assert!(fresh.y < old.y, "{zone:?}: should land above");
+                    } else {
+                        assert!(fresh.y > old.y, "{zone:?}: should land below");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn splitting_left_then_right_keeps_the_original_in_the_middle() {
+        let mut t = Tree::new();
+        let left = t.split_towards(0, DropZone::Left).unwrap();
+        let right = t.split_towards(0, DropZone::Right).unwrap();
+        let l = t.layout(AREA);
+        assert!(l[&left].x < l[&0].x, "left");
+        assert!(l[&right].x > l[&0].x, "right");
+        assert_close(l[&left].w + l[&0].w + l[&right].w, 100.0);
+    }
+
+    #[test]
+    fn divider_at_is_stable_across_calls() {
+        // A T-junction: the outer boundary and an inner one overlap near the
+        // crossing, and node_rects is a HashMap, so order used to vary per call.
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        t.split(b, Orientation::Vertical);
+
+        let first = t.divider_at(50.0, 50.0, AREA, 8.0).map(|d| d.id);
+        for _ in 0..50 {
+            assert_eq!(t.divider_at(50.0, 50.0, AREA, 8.0).map(|d| d.id), first);
+        }
+
+        let ids: Vec<_> = t.dividers(AREA, 8.0).iter().map(|d| d.id).collect();
+        for _ in 0..20 {
+            let again: Vec<_> = t.dividers(AREA, 8.0).iter().map(|d| d.id).collect();
+            assert_eq!(again, ids, "dividers() must keep a stable order");
+        }
+    }
+
+    // --- moving a pane elsewhere in the layout ---
+
+    #[test]
+    fn drop_target_picks_the_nearest_edge() {
+        let mut t = Tree::new();
+        t.split(0, Orientation::Horizontal);
+        // Inside the left pane (0..50 x 0..100).
+        let (pane, zone, _) = t.drop_target(5.0, 50.0, AREA, None).unwrap();
+        assert_eq!(pane, 0);
+        assert_eq!(zone, DropZone::Left);
+
+        let (_, zone, _) = t.drop_target(45.0, 50.0, AREA, None).unwrap();
+        assert_eq!(zone, DropZone::Right);
+
+        let (_, zone, _) = t.drop_target(25.0, 3.0, AREA, None).unwrap();
+        assert_eq!(zone, DropZone::Top);
+
+        let (_, zone, _) = t.drop_target(25.0, 97.0, AREA, None).unwrap();
+        assert_eq!(zone, DropZone::Bottom);
+    }
+
+    #[test]
+    fn the_previewed_zone_sticks_near_the_centre() {
+        let mut t = Tree::new();
+        t.split(0, Orientation::Horizontal);
+        // Just left of the middle of pane 0 (0..50 x 0..100).
+        let point = (24.0, 50.0);
+
+        let (_, fresh, _) = t.drop_target(point.0, point.1, AREA, None).unwrap();
+        assert_eq!(
+            fresh,
+            DropZone::Left,
+            "with nothing on screen, nearest wins"
+        );
+
+        let (_, held, _) = t
+            .drop_target(point.0, point.1, AREA, Some((0, DropZone::Right)))
+            .unwrap();
+        assert_eq!(
+            held,
+            DropZone::Right,
+            "a hair past the middle must not flip it"
+        );
+
+        let (_, moved, _) = t
+            .drop_target(10.0, 50.0, AREA, Some((0, DropZone::Right)))
+            .unwrap();
+        assert_eq!(moved, DropZone::Left, "a deliberate move still flips it");
+    }
+
+    #[test]
+    fn the_zone_does_not_stick_across_panes() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        // Held zone belongs to the other pane, so it carries no weight here.
+        let (pane, zone, _) = t
+            .drop_target(24.0, 50.0, AREA, Some((b, DropZone::Right)))
+            .unwrap();
+        assert_eq!(pane, 0);
+        assert_eq!(zone, DropZone::Left);
+    }
+
+    #[test]
+    fn the_preview_is_the_half_it_would_take() {
+        let mut t = Tree::new();
+        t.split(0, Orientation::Horizontal);
+        let (_, _, preview) = t.drop_target(45.0, 50.0, AREA, None).unwrap();
+        // Right half of the left pane.
+        assert_close(preview.x, 25.0);
+        assert_close(preview.w, 25.0);
+        assert_close(preview.h, 100.0);
+    }
+
+    #[test]
+    fn moving_a_pane_keeps_every_pane() {
+        //   +----+----+          +----+----+
+        //   |    | b  |          | c  | b  |
+        //   | 0  +----+  c left  | 0  +----+
+        //   |    | c  |          |    |    |
+        //   +----+----+          +----+----+
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let c = t.split(b, Orientation::Vertical).unwrap();
+
+        assert!(t.move_pane(c, 0, DropZone::Left));
+        let mut panes = t.panes();
+        panes.sort_unstable();
+        assert_eq!(
+            panes,
+            vec![0, b, c],
+            "no se debe perder ni duplicar ningun pane"
+        );
+
+        let l = t.layout(AREA);
+        // c ended up left of 0, and b takes the whole right side.
+        assert!(l[&c].x < l[&0].x, "c should sit left of 0");
+        assert_close(l[&b].h, 100.0);
+    }
+
+    #[test]
+    fn moving_below_a_pane_stacks_them() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        assert!(t.move_pane(b, 0, DropZone::Bottom));
+
+        let l = t.layout(AREA);
+        assert_close(l[&0].w, 100.0);
+        assert_close(l[&b].w, 100.0);
+        assert!(l[&b].y > l[&0].y, "b should sit below");
+    }
+
+    #[test]
+    fn a_pane_cannot_be_moved_onto_itself() {
+        let mut t = Tree::new();
+        t.split(0, Orientation::Horizontal);
+        assert!(!t.move_pane(0, 0, DropZone::Left));
+    }
+
+    #[test]
+    fn moving_leaves_no_gaps_or_overlap() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let c = t.split(b, Orientation::Vertical).unwrap();
+        let d = t.split(c, Orientation::Horizontal).unwrap();
+
+        assert!(t.move_pane(d, 0, DropZone::Top));
+
+        let l = t.layout(AREA);
+        assert_eq!(l.len(), 4);
+        let total: f32 = l.values().map(|r| r.w * r.h).sum();
+        assert_close(total, AREA.w * AREA.h);
+    }
+
+    #[test]
+    fn navigation_still_works_after_a_move() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let c = t.split(b, Orientation::Vertical).unwrap();
+        t.move_pane(c, 0, DropZone::Bottom);
+
+        for p in t.panes() {
+            for d in [
+                Direction::Left,
+                Direction::Right,
+                Direction::Up,
+                Direction::Down,
+            ] {
+                if let Some(n) = t.neighbour(p, d, AREA) {
+                    assert_ne!(n, p);
+                    assert!(t.panes().contains(&n));
+                }
+            }
+        }
+    }
+
+    // --- dividers: the boundaries the user drags ---
+
+    #[test]
+    fn a_single_pane_has_no_dividers() {
+        let t = Tree::new();
+        assert!(t.dividers(AREA, 6.0).is_empty());
+    }
+
+    #[test]
+    fn one_split_makes_one_divider_on_the_boundary() {
+        let mut t = Tree::new();
+        t.split(0, Orientation::Horizontal);
+        let d = t.dividers(AREA, 6.0);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].orientation, Orientation::Horizontal);
+        // Centred on the 50/50 boundary and spanning the full height.
+        assert_close(d[0].rect.x + d[0].rect.w / 2.0, 50.0);
+        assert_close(d[0].rect.w, 6.0);
+        assert_close(d[0].rect.h, 100.0);
+    }
+
+    #[test]
+    fn nested_splits_expose_one_divider_per_gap() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let c = t.split(b, Orientation::Vertical).unwrap();
+        t.split(c, Orientation::Vertical);
+        // One gap on the outer branch, two on the inner one.
+        assert_eq!(t.dividers(AREA, 6.0).len(), 3);
+    }
+
+    #[test]
+    fn divider_at_finds_the_boundary_and_misses_elsewhere() {
+        let mut t = Tree::new();
+        t.split(0, Orientation::Horizontal);
+        assert!(t.divider_at(50.0, 40.0, AREA, 6.0).is_some());
+        assert!(t.divider_at(52.0, 40.0, AREA, 6.0).is_some());
+        assert!(t.divider_at(20.0, 40.0, AREA, 6.0).is_none());
+        assert!(t.divider_at(80.0, 40.0, AREA, 6.0).is_none());
+    }
+
+    #[test]
+    fn dragging_moves_the_boundary_by_the_pixels_asked() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let id = t.dividers(AREA, 6.0)[0].id;
+
+        assert!(t.drag_divider(id, 20.0, AREA));
+        let l = t.layout(AREA);
+        assert_close(l[&0].w, 70.0);
+        assert_close(l[&b].w, 30.0);
+    }
+
+    #[test]
+    fn dragging_only_touches_the_two_neighbours() {
+        // Three side by side. Moving the first boundary must leave the third alone,
+        // which is what tells a divider drag apart from `resize`.
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let c = t.split(b, Orientation::Horizontal).unwrap();
+        let before = t.layout(AREA)[&c];
+
+        let mut dividers = t.dividers(AREA, 6.0);
+        dividers.sort_by(|a, b| a.rect.x.partial_cmp(&b.rect.x).unwrap());
+        assert!(t.drag_divider(dividers[0].id, 10.0, AREA));
+
+        let l = t.layout(AREA);
+        assert_close(l[&c].w, before.w);
+        assert_close(l[&c].x, before.x);
+        assert_close(l[&0].w + l[&b].w + l[&c].w, 100.0);
+    }
+
+    #[test]
+    fn dragging_stops_before_starving_a_neighbour() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let id = t.dividers(AREA, 6.0)[0].id;
+
+        t.drag_divider(id, 10_000.0, AREA);
+        let l = t.layout(AREA);
+        assert!(l[&b].w >= 4.0, "el vecino quedo en {}", l[&b].w);
+        assert_close(l[&0].w + l[&b].w, 100.0);
+    }
+
+    #[test]
+    fn dragging_back_returns_to_the_start() {
+        let mut t = Tree::new();
+        t.split(0, Orientation::Vertical);
+        let id = t.dividers(AREA, 6.0)[0].id;
+
+        t.drag_divider(id, 25.0, AREA);
+        t.drag_divider(id, -25.0, AREA);
+        assert_close(t.layout(AREA)[&0].h, 50.0);
+    }
+
+    #[test]
+    fn dividers_follow_the_area_they_are_asked_about() {
+        let mut t = Tree::new();
+        t.split(0, Orientation::Horizontal);
+        let wide = Rect::new(0.0, 0.0, 400.0, 200.0);
+        let d = t.dividers(wide, 8.0);
+        assert_close(d[0].rect.x + d[0].rect.w / 2.0, 200.0);
+        assert_close(d[0].rect.h, 200.0);
+    }
+
+    // --- directional navigation: the part Warp flags as hard ---
 
     #[test]
     fn moves_between_side_by_side_panes() {
@@ -532,7 +1141,7 @@ mod tests {
 
     #[test]
     fn crosses_branches_by_geometry_not_by_tree_order() {
-        // Izquierda ocupa toda la altura; derecha esta partida en dos.
+        // Left spans the full height; the right side is split in two.
         //   +--------+--------+
         //   |        |   b    |
         //   |   0    +--------+
@@ -542,8 +1151,8 @@ mod tests {
         let b = t.split(0, Orientation::Horizontal).unwrap();
         let c = t.split(b, Orientation::Vertical).unwrap();
 
-        // Desde arriba a la derecha, ir a la izquierda cae en 0 aunque en el
-        // arbol 0 no sea su hermano.
+        // From the top right, moving left lands on 0 even though the tree does
+        // not make them siblings.
         assert_eq!(t.neighbour(b, Direction::Left, AREA), Some(0));
         assert_eq!(t.neighbour(c, Direction::Left, AREA), Some(0));
         assert_eq!(t.neighbour(b, Direction::Down, AREA), Some(c));
@@ -552,10 +1161,8 @@ mod tests {
 
     #[test]
     fn picks_the_neighbour_that_overlaps_most() {
-        // 0 ocupa toda la izquierda. A la derecha hay tres apilados.
-        // Desde 0 hacia la derecha debe elegir el del medio, que es el que
-        // mas se solapa con el centro de 0... salvo que empaten, y entonces
-        // gana el mas cercano al centro.
+        // 0 spans the left. Three panes are stacked on the right; the one that
+        // overlaps 0 most wins, ties going to the nearest.
         let mut t = Tree::new();
         let b = t.split(0, Orientation::Horizontal).unwrap();
         let c = t.split(b, Orientation::Vertical).unwrap();
@@ -566,7 +1173,7 @@ mod tests {
         assert_close(l[&c].h, 25.0);
         assert_close(l[&d].h, 25.0);
 
-        // b es el que mas alto tiene, asi que se solapa mas con 0.
+        // b is the tallest, so it overlaps 0 most.
         assert_eq!(t.neighbour(0, Direction::Right, AREA), Some(b));
     }
 
@@ -582,7 +1189,7 @@ mod tests {
         let c = t.split(b, Orientation::Vertical).unwrap();
         let d = t.split(0, Orientation::Vertical).unwrap();
 
-        // En diagonal no hay vecino: 0 y c solo se tocan en la esquina.
+        // No diagonal neighbour: 0 and c only touch at the corner.
         assert_ne!(t.neighbour(0, Direction::Down, AREA), Some(c));
         assert_eq!(t.neighbour(0, Direction::Down, AREA), Some(d));
         assert_eq!(t.neighbour(0, Direction::Right, AREA), Some(b));
@@ -694,7 +1301,7 @@ mod fuzz {
                 check_invariants(&t, area);
             }
 
-            // La navegacion nunca debe devolver un pane inexistente ni uno mismo.
+            // Navigation must never return a missing pane, nor the pane itself.
             let panes = t.panes();
             for &p in &panes {
                 for d in [
@@ -728,8 +1335,8 @@ mod fuzz {
             t.split(pane, o);
         }
 
-        // Ir y volver tiene que llevarte a un pane que a su vez te devuelva al
-        // original: si no, la navegacion "se pierde" y el usuario lo nota.
+        // Going and coming back must land somewhere that leads back: otherwise
+        // navigation "gets lost" and the user notices.
         for &p in &t.panes() {
             for (go, back) in [
                 (Direction::Left, Direction::Right),

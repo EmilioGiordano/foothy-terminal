@@ -20,7 +20,8 @@ fn main() -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut total_bytes = 0usize;
     loop {
-        let (bytes, eof) = pty.drain(10);
+        let d = pty.drain(10);
+        let (bytes, eof) = (d.bytes, d.eof);
         if !bytes.is_empty() {
             total_bytes += bytes.len();
             term.feed(&bytes);
@@ -38,7 +39,7 @@ fn main() -> anyhow::Result<()> {
             // still in flight in the reader thread. Draining once truncates output.
             let quiet_until = Instant::now() + Duration::from_millis(50);
             while Instant::now() < quiet_until {
-                let (rest, _) = pty.drain(100);
+                let rest = pty.drain(100).bytes;
                 if rest.is_empty() {
                     std::thread::sleep(Duration::from_millis(2));
                 } else {

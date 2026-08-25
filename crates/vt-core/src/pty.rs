@@ -11,6 +11,40 @@ pub enum PtyEvent {
     Eof,
 }
 
+/// Split out so it can be exercised without spawning a shell.
+fn drain_from(rx: &Receiver<PtyEvent>, max_reads: usize) -> Drained {
+    let mut bytes = Vec::new();
+    let mut eof = false;
+    let mut more = false;
+    for i in 0..max_reads {
+        match rx.try_recv() {
+            Ok(PtyEvent::Output(mut b)) => {
+                bytes.append(&mut b);
+                more = i + 1 == max_reads;
+            }
+            Ok(PtyEvent::Eof) | Err(TryRecvError::Disconnected) => {
+                eof = true;
+                more = false;
+                break;
+            }
+            Err(TryRecvError::Empty) => {
+                more = false;
+                break;
+            }
+        }
+    }
+    Drained { bytes, eof, more }
+}
+
+/// One bounded read of the child's output.
+pub struct Drained {
+    pub bytes: Vec<u8>,
+    /// The session ended.
+    pub eof: bool,
+    /// The cap was reached and there is still data waiting.
+    pub more: bool,
+}
+
 pub struct Pty {
     master: Option<Box<dyn MasterPty + Send>>,
     writer: Box<dyn Write + Send>,
@@ -119,21 +153,12 @@ impl Pty {
         Ok(())
     }
 
-    // Bounded per turn (docs/02 §3 rule 7): one noisy pane must not starve the others.
-    pub fn drain(&self, max_reads: usize) -> (Vec<u8>, bool) {
-        let mut out = Vec::new();
-        let mut eof = false;
-        for _ in 0..max_reads {
-            match self.rx.try_recv() {
-                Ok(PtyEvent::Output(mut b)) => out.append(&mut b),
-                Ok(PtyEvent::Eof) | Err(TryRecvError::Disconnected) => {
-                    eof = true;
-                    break;
-                }
-                Err(TryRecvError::Empty) => break,
-            }
-        }
-        (out, eof)
+    /// Bounded per turn (docs/02 §3 rule 7): one noisy pane must not starve the
+    /// others. `more` says the cap was hit with data still queued, and the caller
+    /// must come back: the waker only fires for *new* bytes, so whatever is left
+    /// would otherwise sit unread until the child happens to write again.
+    pub fn drain(&self, max_reads: usize) -> Drained {
+        drain_from(&self.rx, max_reads)
     }
 
     pub fn child_exited(&self) -> Option<portable_pty::ExitStatus> {
@@ -165,7 +190,7 @@ mod tests {
         let mut term = Terminal::new(size);
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
-            let (bytes, _) = pty.drain(10);
+            let bytes = pty.drain(10).bytes;
             if !bytes.is_empty() {
                 term.feed(&bytes);
                 let replies = term.take_pty_replies();
@@ -179,6 +204,50 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         None
+    }
+
+    #[test]
+    fn a_capped_drain_says_there_is_more_and_loses_nothing() {
+        let (tx, rx) = channel();
+        for _ in 0..5 {
+            tx.send(PtyEvent::Output(vec![b'x'])).unwrap();
+        }
+
+        let mut collected = Vec::new();
+        let mut rounds = 0;
+        loop {
+            let read = drain_from(&rx, 2);
+            collected.extend_from_slice(&read.bytes);
+            rounds += 1;
+            assert!(rounds < 10, "should not spin forever");
+            if !read.more {
+                break;
+            }
+        }
+        assert_eq!(collected.len(), 5, "capping a read must not drop bytes");
+        assert!(rounds >= 3, "5 items with a cap of 2 needs several rounds");
+    }
+
+    #[test]
+    fn an_uncapped_drain_reports_nothing_left() {
+        let (tx, rx) = channel();
+        tx.send(PtyEvent::Output(vec![b'a', b'b'])).unwrap();
+        let read = drain_from(&rx, 10);
+        assert_eq!(read.bytes, b"ab");
+        assert!(!read.more);
+        assert!(!read.eof);
+    }
+
+    #[test]
+    fn eof_stops_the_drain() {
+        let (tx, rx) = channel();
+        tx.send(PtyEvent::Output(vec![b'a'])).unwrap();
+        tx.send(PtyEvent::Eof).unwrap();
+        tx.send(PtyEvent::Output(vec![b'z'])).unwrap();
+        let read = drain_from(&rx, 10);
+        assert_eq!(read.bytes, b"a");
+        assert!(read.eof);
+        assert!(!read.more);
     }
 
     #[test]
