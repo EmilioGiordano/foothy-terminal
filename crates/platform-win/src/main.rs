@@ -165,6 +165,7 @@ impl App {
     fn pump_pty(&mut self) {
         let Some(pty) = self.pty.as_mut() else { return };
         let (bytes, eof) = pty.drain(10);
+        let exited = pty.child_exited().is_some();
         if !bytes.is_empty() {
             self.term.feed(&bytes);
             self.dirty = true;
@@ -173,9 +174,25 @@ impl App {
                 self.send(&replies);
             }
         }
-        if eof {
-            self.pty = None;
+        if eof || exited {
+            self.end_session();
         }
+    }
+
+    /// The child exiting says nothing about the pipe being empty, so the tail is
+    /// collected before the PTY goes away or the last output is lost.
+    fn end_session(&mut self) {
+        let Some(pty) = self.pty.as_ref() else { return };
+        let quiet_until = Instant::now() + Duration::from_millis(50);
+        while Instant::now() < quiet_until {
+            let (rest, _) = pty.drain(100);
+            if rest.is_empty() {
+                std::thread::sleep(Duration::from_millis(2));
+            } else {
+                self.term.feed(&rest);
+            }
+        }
+        self.pty = None;
     }
 
     fn window_px(&self) -> (usize, usize) {
@@ -371,7 +388,7 @@ impl ApplicationHandler for App {
         match Pty::spawn_with_waker(
             cmd,
             self.size,
-            Some(Box::new(move || {
+            Some(std::sync::Arc::new(move || {
                 let _ = proxy.send_event(());
             })),
         ) {
