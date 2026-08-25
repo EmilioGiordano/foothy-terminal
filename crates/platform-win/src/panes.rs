@@ -242,8 +242,14 @@ impl Panes {
     }
 
     /// Where a pane dropped here would land, with the rectangle to preview.
-    pub fn drop_target(&self, x: f64, y: f64, area: Rect) -> Option<(PaneId, DropZone, Rect)> {
-        self.tree.drop_target(x as f32, y as f32, area)
+    pub fn drop_target(
+        &self,
+        x: f64,
+        y: f64,
+        area: Rect,
+        current: Option<(PaneId, DropZone)>,
+    ) -> Option<(PaneId, DropZone, Rect)> {
+        self.tree.drop_target(x as f32, y as f32, area, current)
     }
 
     pub fn move_pane(&mut self, pane: PaneId, target: PaneId, zone: DropZone) -> bool {

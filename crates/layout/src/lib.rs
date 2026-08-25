@@ -6,6 +6,11 @@
 
 use std::collections::HashMap;
 
+/// How much better a zone has to be before the preview leaves the one it is
+/// already showing. The four zones meet at the centre of a pane, so without a
+/// dead band a still hand flips the preview between them.
+const ZONE_HYSTERESIS: f32 = 0.06;
+
 pub type PaneId = u64;
 type NodeId = usize;
 
@@ -286,7 +291,16 @@ impl Tree {
 
     /// Where a pane dropped at this point would land, and the rectangle to
     /// preview. The nearest edge of the pane under the cursor wins.
-    pub fn drop_target(&self, x: f32, y: f32, area: Rect) -> Option<(PaneId, DropZone, Rect)> {
+    ///
+    /// `current` is the zone already on screen, if any; it keeps its slot unless
+    /// another beats it by [`ZONE_HYSTERESIS`].
+    pub fn drop_target(
+        &self,
+        x: f32,
+        y: f32,
+        area: Rect,
+        current: Option<(PaneId, DropZone)>,
+    ) -> Option<(PaneId, DropZone, Rect)> {
         let rects = self.layout(area);
         let (&pane, &r) = rects
             .iter()
@@ -295,22 +309,28 @@ impl Tree {
             return None;
         }
 
-        let left = (x - r.x) / r.w;
-        let right = 1.0 - left;
-        let top = (y - r.y) / r.h;
-        let bottom = 1.0 - top;
+        let distance = |zone: DropZone| match zone {
+            DropZone::Left => (x - r.x) / r.w,
+            DropZone::Right => 1.0 - (x - r.x) / r.w,
+            DropZone::Top => (y - r.y) / r.h,
+            DropZone::Bottom => 1.0 - (y - r.y) / r.h,
+        };
 
         let mut zone = DropZone::Left;
-        let mut best = left;
-        for (candidate, d) in [
-            (DropZone::Right, right),
-            (DropZone::Top, top),
-            (DropZone::Bottom, bottom),
-        ] {
+        let mut best = distance(DropZone::Left);
+        for candidate in [DropZone::Right, DropZone::Top, DropZone::Bottom] {
+            let d = distance(candidate);
             if d < best {
                 best = d;
                 zone = candidate;
             }
+        }
+
+        if let Some((held_pane, held)) = current
+            && held_pane == pane
+            && distance(held) <= best + ZONE_HYSTERESIS
+        {
+            zone = held;
         }
 
         let preview = match zone {
@@ -839,25 +859,66 @@ mod tests {
         let mut t = Tree::new();
         t.split(0, Orientation::Horizontal);
         // Inside the left pane (0..50 x 0..100).
-        let (pane, zone, _) = t.drop_target(5.0, 50.0, AREA).unwrap();
+        let (pane, zone, _) = t.drop_target(5.0, 50.0, AREA, None).unwrap();
         assert_eq!(pane, 0);
         assert_eq!(zone, DropZone::Left);
 
-        let (_, zone, _) = t.drop_target(45.0, 50.0, AREA).unwrap();
+        let (_, zone, _) = t.drop_target(45.0, 50.0, AREA, None).unwrap();
         assert_eq!(zone, DropZone::Right);
 
-        let (_, zone, _) = t.drop_target(25.0, 3.0, AREA).unwrap();
+        let (_, zone, _) = t.drop_target(25.0, 3.0, AREA, None).unwrap();
         assert_eq!(zone, DropZone::Top);
 
-        let (_, zone, _) = t.drop_target(25.0, 97.0, AREA).unwrap();
+        let (_, zone, _) = t.drop_target(25.0, 97.0, AREA, None).unwrap();
         assert_eq!(zone, DropZone::Bottom);
+    }
+
+    #[test]
+    fn the_previewed_zone_sticks_near_the_centre() {
+        let mut t = Tree::new();
+        t.split(0, Orientation::Horizontal);
+        // Just left of the middle of pane 0 (0..50 x 0..100).
+        let point = (24.0, 50.0);
+
+        let (_, fresh, _) = t.drop_target(point.0, point.1, AREA, None).unwrap();
+        assert_eq!(
+            fresh,
+            DropZone::Left,
+            "with nothing on screen, nearest wins"
+        );
+
+        let (_, held, _) = t
+            .drop_target(point.0, point.1, AREA, Some((0, DropZone::Right)))
+            .unwrap();
+        assert_eq!(
+            held,
+            DropZone::Right,
+            "a hair past the middle must not flip it"
+        );
+
+        let (_, moved, _) = t
+            .drop_target(10.0, 50.0, AREA, Some((0, DropZone::Right)))
+            .unwrap();
+        assert_eq!(moved, DropZone::Left, "a deliberate move still flips it");
+    }
+
+    #[test]
+    fn the_zone_does_not_stick_across_panes() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        // Held zone belongs to the other pane, so it carries no weight here.
+        let (pane, zone, _) = t
+            .drop_target(24.0, 50.0, AREA, Some((b, DropZone::Right)))
+            .unwrap();
+        assert_eq!(pane, 0);
+        assert_eq!(zone, DropZone::Left);
     }
 
     #[test]
     fn the_preview_is_the_half_it_would_take() {
         let mut t = Tree::new();
         t.split(0, Orientation::Horizontal);
-        let (_, _, preview) = t.drop_target(45.0, 50.0, AREA).unwrap();
+        let (_, _, preview) = t.drop_target(45.0, 50.0, AREA, None).unwrap();
         // Right half of the left pane.
         assert_close(preview.x, 25.0);
         assert_close(preview.w, 25.0);
