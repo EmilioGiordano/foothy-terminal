@@ -173,24 +173,8 @@ impl Panes {
         })
     }
 
-    /// Overlapping hit areas at a T-junction resolve to the smaller rectangle,
-    /// which is the boundary the eye reads as nearer.
     pub fn divider_at(dividers: &[Divider], x: f64, y: f64) -> Option<Divider> {
-        let (x, y) = (x as f32, y as f32);
-        dividers
-            .iter()
-            .copied()
-            .filter(|d| {
-                x >= d.rect.x
-                    && x <= d.rect.x + d.rect.w
-                    && y >= d.rect.y
-                    && y <= d.rect.y + d.rect.h
-            })
-            .min_by(|a, b| {
-                (a.rect.w * a.rect.h)
-                    .partial_cmp(&(b.rect.w * b.rect.h))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+        layout::divider_at(dividers, x as f32, y as f32)
     }
 
     pub fn header_at(

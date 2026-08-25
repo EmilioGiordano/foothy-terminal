@@ -6,6 +6,26 @@
 
 use std::collections::HashMap;
 
+/// The divider under a point, if any.
+///
+/// Hit areas overlap where an inner branch meets an outer one; the smaller
+/// rectangle wins because it is the more specific boundary the eye sees. Equal
+/// areas fall back to the id, so the cursor icon and the click that follows it
+/// can never pick different dividers.
+pub fn divider_at(dividers: &[Divider], x: f32, y: f32) -> Option<Divider> {
+    dividers
+        .iter()
+        .copied()
+        .filter(|d| x >= d.rect.x && x <= d.rect.right() && y >= d.rect.y && y <= d.rect.bottom())
+        .min_by(|a, b| {
+            let area_of = |d: &Divider| d.rect.w * d.rect.h;
+            area_of(a)
+                .partial_cmp(&area_of(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| (a.id.branch, a.id.after).cmp(&(b.id.branch, b.id.after)))
+        })
+}
+
 /// How much better a zone has to be before the preview leaves the one it is
 /// already showing. The four zones meet at the centre of a pane, so without a
 /// dead band a still hand flips the preview between them.
@@ -492,23 +512,10 @@ impl Tree {
         out
     }
 
-    /// The divider under a point, if any.
-    ///
-    /// Hit areas overlap where an inner branch meets an outer one; the smaller
-    /// rectangle wins because it is the more specific boundary the eye sees.
+    /// The divider under a point, if any. Callers holding a cached set should
+    /// use [`divider_at`] directly instead of rebuilding the layout.
     pub fn divider_at(&self, x: f32, y: f32, area: Rect, thickness: f32) -> Option<Divider> {
-        self.dividers(area, thickness)
-            .into_iter()
-            .filter(|d| {
-                x >= d.rect.x && x <= d.rect.right() && y >= d.rect.y && y <= d.rect.bottom()
-            })
-            .min_by(|a, b| {
-                let area_of = |d: &Divider| d.rect.w * d.rect.h;
-                area_of(a)
-                    .partial_cmp(&area_of(b))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| (a.id.branch, a.id.after).cmp(&(b.id.branch, b.id.after)))
-            })
+        divider_at(&self.dividers(area, thickness), x, y)
     }
 
     /// Moves one boundary by `delta` pixels.
