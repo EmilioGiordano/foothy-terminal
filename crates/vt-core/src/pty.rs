@@ -107,15 +107,6 @@ impl Pty {
         })
     }
 
-    pub fn spawn_default_shell(size: TermSize) -> anyhow::Result<Self> {
-        let shell = if cfg!(windows) {
-            std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into())
-        } else {
-            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
-        };
-        Self::spawn(CommandBuilder::new(shell), size)
-    }
-
     pub fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         self.writer.write_all(bytes)?;
         self.writer.flush()
@@ -147,10 +138,6 @@ impl Pty {
 
     pub fn child_exited(&self) -> Option<portable_pty::ExitStatus> {
         self.exit.lock().unwrap().clone()
-    }
-
-    pub fn recv(&self) -> Option<PtyEvent> {
-        self.rx.recv().ok()
     }
 }
 
