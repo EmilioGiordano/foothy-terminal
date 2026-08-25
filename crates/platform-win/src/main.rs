@@ -10,7 +10,7 @@ use input::{Key, Mods};
 use portable_pty::CommandBuilder;
 use render::{CursorLook, Renderer};
 use vt_core::pty::Pty;
-use vt_core::{CursorShape, Scroll, SelectionType, Side, TermSize, Terminal};
+use vt_core::{CursorShape, Scroll, SelectionType, Side, TermEvent, TermSize, Terminal};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
@@ -172,6 +172,14 @@ impl App {
             let replies = self.term.take_pty_replies();
             if !replies.is_empty() {
                 self.send(&replies);
+            }
+            // Whatever is not consumed here accumulates for the whole session.
+            for event in self.term.drain_events() {
+                if let TermEvent::Title(title) = event
+                    && let Some(w) = self.window.as_ref()
+                {
+                    w.set_title(&title);
+                }
             }
         }
         if eof || exited {
