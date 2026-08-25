@@ -353,9 +353,12 @@ impl ApplicationHandler for App {
         let (cw, ch) = self.renderer.cell_size();
         let attrs = Window::default_attributes()
             .with_title("foot-win — fase 0")
-            .with_inner_size(winit::dpi::LogicalSize::new(
-                (cw * self.size.columns) as f64,
-                (ch * self.size.screen_lines) as f64,
+            // Physical, not logical: the cell metrics come from a font rasterised
+            // at a pixel size, so scaling them again by the DPI factor would ask
+            // for a window 1.5x too large at 150%.
+            .with_inner_size(winit::dpi::PhysicalSize::new(
+                (cw * self.size.columns) as u32,
+                (ch * self.size.screen_lines) as u32,
             ));
         let window = Rc::new(event_loop.create_window(attrs).expect("crear ventana"));
 
