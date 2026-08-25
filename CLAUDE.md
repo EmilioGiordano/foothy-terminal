@@ -25,9 +25,18 @@ Diagnostics that need no window:
 cargo run -p vt-core --bin spike -- "dir"        # pump a command, dump the grid as text
 cargo run -p platform-win --bin keytest -- win32 # what actually reaches PSReadLine
 cargo run -p render --example coverage           # which glyphs the font has
+cargo run -p vt-core --example prompt_probe -- p.ps1  # run a prompt script under ConPTY
 ```
 
-Runtime tuning, no rebuild: `FOOTWIN_FONT`, `FOOTWIN_FONT_PX`, `FOOTWIN_PAD`, `FOOTWIN_FG`, `FOOTWIN_BG`, `FOOTWIN_ALPHA`, `FOOTWIN_BLINK`, `FOOTWIN_PASTE_WARN`.
+Rust tests cannot tell whether the PowerShell in `platform-win/src/prompt.rs` is
+valid. `dump_the_script` writes it out and `prompt_probe` runs it for real:
+
+```sh
+FOOTWIN_DUMP=p.ps1 cargo test -p platform-win dump_the_script -- --ignored
+cargo run -p vt-core --example prompt_probe -- p.ps1
+```
+
+Runtime tuning, no rebuild: `FOOTWIN_FONT`, `FOOTWIN_FONT_PX`, `FOOTWIN_PAD`, `FOOTWIN_FG`, `FOOTWIN_BG`, `FOOTWIN_ALPHA`, `FOOTWIN_BLINK`, `FOOTWIN_PASTE_WARN`, `FOOTWIN_PROMPT` (`0` keeps the shell's own prompt).
 
 ## Architecture: the layer rule
 
