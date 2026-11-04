@@ -20,6 +20,17 @@ pub enum CursorLook {
 
 pub const MIN_FONT_PX: f32 = 6.0;
 pub const MAX_FONT_PX: f32 = 72.0;
+const FALLBACK_FONT_PX: f32 = 16.0;
+
+/// Every size entering fontdue goes through here. A negative or huge `scale`
+/// makes it ask for gigabytes and abort the process, and NaN survives the
+/// clamp and metrics to die at the first rasterisation.
+fn sane_px(px: f32) -> f32 {
+    if px.is_nan() {
+        return FALLBACK_FONT_PX;
+    }
+    px.clamp(MIN_FONT_PX, MAX_FONT_PX)
+}
 
 // foot's own defaults, taken from upstream/foot/config.c:33-68. The man page
 // still documents the old Solarized values; the code is what ships.
@@ -53,6 +64,7 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(font_bytes: &[u8], px: f32) -> anyhow::Result<Self> {
+        let px = sane_px(px);
         let font = Font::from_bytes(
             font_bytes,
             FontSettings {
@@ -92,7 +104,7 @@ impl Renderer {
     /// stay crisp. The caller must recompute the grid afterwards: the cell
     /// changed size, so the terminal now holds a different number of them.
     pub fn set_font_size(&mut self, px: f32) -> bool {
-        let px = px.clamp(MIN_FONT_PX, MAX_FONT_PX);
+        let px = sane_px(px);
         if (px - self.px).abs() < 0.01 {
             return false;
         }
@@ -572,6 +584,48 @@ mod tests {
 
     fn renderer() -> Renderer {
         Renderer::new(&font_bytes(), 16.0).unwrap()
+    }
+
+    /// A size out of range used to abort the process inside fontdue, so this
+    /// has to rasterise, not just construct: NaN only dies at that point.
+    #[test]
+    fn a_hostile_font_size_still_renders() {
+        let bytes = font_bytes();
+        for px in [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -16.0,
+            1e30,
+            0.0,
+            1000.0,
+        ] {
+            let mut r = Renderer::new(&bytes, px).unwrap();
+            let got = r.font_size();
+            assert!(
+                got.is_finite() && (MIN_FONT_PX..=MAX_FONT_PX).contains(&got),
+                "{px} gave {got}"
+            );
+
+            let (cw, ch) = r.cell_size();
+            let (w, h) = (cw * 4, ch * 2);
+            let mut term = Terminal::new(TermSize::new(4, 2));
+            term.feed(b"X");
+            let mut buf = vec![0u32; w * h];
+            r.draw(&term, &mut buf, w, h, CursorLook::Beam);
+            assert!(buf.iter().any(|p| *p != DEFAULT_BG), "{px} drew nothing");
+
+            let mut r = renderer();
+            r.set_font_size(px);
+            let after = r.font_size();
+            assert!(
+                after.is_finite() && (MIN_FONT_PX..=MAX_FONT_PX).contains(&after),
+                "set_font_size({px}) gave {after}"
+            );
+            let (cw, ch) = r.cell_size();
+            let mut buf = vec![0u32; cw * 4 * ch * 2];
+            r.draw(&term, &mut buf, cw * 4, ch * 2, CursorLook::Beam);
+        }
     }
 
     #[test]
