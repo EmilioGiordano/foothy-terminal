@@ -5,6 +5,9 @@
 mod chrome;
 mod clipboard;
 mod config_file;
+// Pure list state; the wiring task removes the attribute when main.rs uses it.
+#[cfg_attr(not(test), expect(dead_code))]
+mod palette;
 mod panes;
 
 use std::collections::HashMap;
