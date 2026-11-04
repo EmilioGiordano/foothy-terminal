@@ -19,12 +19,77 @@ pub const STATE_FILE: &str = "state.ini";
 pub struct Loaded {
     pub config: Config,
     pub problems: Vec<String>,
+    /// state.ini and foothy.ini merged, without the theme under them: the
+    /// palette re-composes from this so a preview keeps the user's own layers.
+    pub files: Partial,
+    pub pins: Pins,
+}
+
+/// What would survive a restart and defeat a theme written to state.ini.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Pins {
+    pub theme_file: bool,
+    pub env_color: bool,
+}
+
+impl Pins {
+    pub fn notice(&self) -> Option<String> {
+        let what = match (self.theme_file, self.env_color) {
+            (true, true) => "theme= in foothy.ini and FOOTWIN_FG/BG",
+            (true, false) => "theme= in foothy.ini",
+            (false, true) => "FOOTWIN_FG/BG",
+            (false, false) => return None,
+        };
+        Some(format!(
+            "Note: {what} wins at startup, so this pick lasts for this session only."
+        ))
+    }
 }
 
 fn dir() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("foothy"))
 }
 
+pub fn themes_dir() -> Option<PathBuf> {
+    dir().map(|d| d.join("themes"))
+}
+
+/// A theme the user dropped in `%APPDATA%\foothy\themes`. Rejected names are
+/// left out: `load` would refuse them, so showing one promises a theme that
+/// cannot be committed.
+pub fn user_theme_names() -> Vec<String> {
+    let Some(dir) = themes_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| is_theme_name(n))
+        .collect()
+}
+
+pub fn read_user_theme(name: &str) -> Option<String> {
+    std::fs::read_to_string(themes_dir()?.join(name)).ok()
+}
+
+/// Every name the picker may show, sorted. A user file shadowing a bundled
+/// one appears once (config_file.rs user-before-bundled lookup).
+pub fn theme_names(user: &[String]) -> Vec<String> {
+    let mut names: Vec<String> = config::bundled_names()
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
+    names.extend(user.iter().cloned());
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// `None` for a missing file, which is the normal case; any other IO error is
+/// a problem to report, not a reason to refuse to start.
 fn slurp(path: &std::path::Path, problems: &mut Vec<String>) -> Option<String> {
     match std::fs::read_to_string(path) {
         Ok(text) => Some(text),
@@ -72,39 +137,83 @@ pub fn load(
 
     let state = layer(STATE_FILE, &mut problems);
     let user = layer(USER_FILE, &mut problems);
+    let pins = Pins {
+        theme_file: user.settings.theme.is_some(),
+        env_color: hex(&env, "FOOTWIN_FG").is_some() || hex(&env, "FOOTWIN_BG").is_some(),
+    };
     let files = merge(state, user);
 
-    let theme = match files.settings.theme.as_deref() {
-        None => Partial::default(),
-        Some(name) if !is_theme_name(name) => {
-            problems.push(format!("theme '{name}' is not a plain name"));
-            Partial::default()
-        }
-        Some(name) => match user_theme(name).or_else(|| bundled(name).map(str::to_string)) {
-            Some(text) => {
-                let (partial, found) = parse_theme(&text);
-                for p in found {
-                    problems.push(format!("theme {name}:{}: {}", p.line, p.message));
-                }
-                partial
-            }
-            None => {
-                problems.push(format!("theme '{name}' not found"));
-                Partial::default()
-            }
-        },
+    let (theme, found) = match files.settings.theme.as_deref() {
+        None => (Partial::default(), Vec::new()),
+        Some(name) => theme_layer(name, &user_theme),
     };
+    problems.extend(found);
 
-    let files = merge(theme, files);
+    Loaded {
+        config: compose(&files, theme, &env),
+        problems,
+        files,
+        pins,
+    }
+}
+
+/// The theme layer alone, resolved the way `load` resolves it: the name gate,
+/// user file before bundled, and the filter that keeps a theme to colours.
+/// Shared so a preview cannot drift from what a restart would produce.
+pub fn theme_layer(
+    name: &str,
+    user_theme: &impl Fn(&str) -> Option<String>,
+) -> (Partial, Vec<String>) {
+    if !is_theme_name(name) {
+        return (
+            Partial::default(),
+            vec![format!("theme '{name}' is not a plain name")],
+        );
+    }
+    match user_theme(name).or_else(|| bundled(name).map(str::to_string)) {
+        Some(text) => {
+            let (partial, found) = parse_theme(&text);
+            let problems = found
+                .into_iter()
+                .map(|p| format!("theme {name}:{}: {}", p.line, p.message))
+                .collect();
+            (partial, problems)
+        }
+        None => (
+            Partial::default(),
+            vec![format!("theme '{name}' not found")],
+        ),
+    }
+}
+
+/// Everything above the theme: `app defaults < theme < state.ini < foothy.ini
+/// < FOOTWIN_*`. The live preview calls this with a candidate theme and the
+/// same `files`, so previewing and committing cannot disagree.
+pub fn compose(files: &Partial, theme: Partial, env: &impl Fn(&str) -> Option<String>) -> Config {
+    let files = merge(theme, files.clone());
     // The variant has to be settled before our own colours go in: they would
     // make the dark slot non-empty and hide a theme that only has a light one.
     let variant = files.variant_for(Variant::Dark);
-    let resolved = merge(merge(defaults(variant), files), from_env(variant, &env));
+    let resolved = merge(merge(defaults(variant), files), from_env(variant, env));
+    resolved.resolve(Variant::Dark)
+}
 
-    Loaded {
-        config: resolved.resolve(Variant::Dark),
-        problems,
-    }
+/// Writes the app's own file. Temp plus rename so a crash mid-write cannot
+/// leave a half-parsed state.ini behind.
+pub fn save_theme_in(dir: &std::path::Path, name: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let body = format!(
+        "# Generated by foothy. Your own settings go in {USER_FILE}, which wins over this file.\ntheme={name}\n"
+    );
+    let tmp = dir.join("state.ini.tmp");
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, dir.join(STATE_FILE))
+}
+
+pub fn save_theme(name: &str) -> std::io::Result<()> {
+    let dir = dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "APPDATA is not set"))?;
+    save_theme_in(&dir, name)
 }
 
 /// Reserved in every directory and with any extension; opening one reaches the
@@ -147,9 +256,13 @@ fn defaults(variant: Variant) -> Partial {
     )
 }
 
+fn hex(env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<u32> {
+    env(key).and_then(|v| u32::from_str_radix(v.trim_start_matches('#'), 16).ok())
+}
+
+/// Deliberately not routed through the ini parser: these keep exactly the
+/// semantics they had before there was a config file.
 fn from_env(variant: Variant, env: &impl Fn(&str) -> Option<String>) -> Partial {
-    let hex =
-        |key: &str| env(key).and_then(|v| u32::from_str_radix(v.trim_start_matches('#'), 16).ok());
     fn num<T: std::str::FromStr>(env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<T> {
         env(key).and_then(|v| v.parse().ok())
     }
@@ -157,8 +270,8 @@ fn from_env(variant: Variant, env: &impl Fn(&str) -> Option<String>) -> Partial 
     into_variant(
         variant,
         PartialColors {
-            foreground: hex("FOOTWIN_FG"),
-            background: hex("FOOTWIN_BG"),
+            foreground: hex(env, "FOOTWIN_FG"),
+            background: hex(env, "FOOTWIN_BG"),
             ..Default::default()
         },
         Settings {
@@ -184,7 +297,7 @@ mod tests {
         None
     }
 
-    fn only(name: &'static str, text: &'static str) -> impl Fn(&str) -> Option<String> {
+    fn only(name: &'static str, text: &'static str) -> impl Fn(&str) -> Option<String> + Copy {
         move |k: &str| (k == name).then(|| text.to_string())
     }
 
@@ -373,6 +486,141 @@ mod tests {
         for name in config::bundled_names() {
             assert!(is_theme_name(name), "{name} rejected");
         }
+    }
+
+    /// Previewing a candidate and committing it have to land on the same
+    /// `Config`, or the picker lies about what Enter will do. The commit side
+    /// goes through the real file: write state.ini, read it back, load it.
+    fn preview_equals_commit(
+        tag: &str,
+        user_file: &'static str,
+        env: impl Fn(&str) -> Option<String> + Copy,
+        user_theme: impl Fn(&str) -> Option<String> + Copy,
+        candidate: &str,
+    ) {
+        let read = |name: &str| match name {
+            STATE_FILE => Some("theme=ferra\n".to_string()),
+            USER_FILE => Some(user_file.to_string()),
+            _ => None,
+        };
+        let base = load(read, user_theme, env);
+        let (theme, _) = theme_layer(candidate, &user_theme);
+        let previewed = compose(&base.files, theme, &env);
+
+        let dir = std::env::temp_dir().join(format!("foothy-test-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        save_theme_in(&dir, candidate).unwrap();
+        let written = std::fs::read_to_string(dir.join(STATE_FILE)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let after = |name: &str| match name {
+            STATE_FILE => Some(written.clone()),
+            USER_FILE => Some(user_file.to_string()),
+            _ => None,
+        };
+        let committed = load(after, user_theme, env);
+        assert!(committed.problems.is_empty(), "{:?}", committed.problems);
+        assert_eq!(previewed, committed.config, "{tag}");
+        assert_ne!(previewed, base.config, "{tag}: nothing changed to prove");
+    }
+
+    #[test]
+    fn previewing_a_theme_matches_committing_it() {
+        preview_equals_commit("plain", "", none, none, "catppuccin-mocha");
+    }
+
+    #[test]
+    fn preview_keeps_the_users_own_colours_on_top_of_the_candidate() {
+        preview_equals_commit(
+            "override",
+            "[colors-dark]\nbackground=000000\nregular1=112233\n",
+            none,
+            none,
+            "catppuccin-mocha",
+        );
+    }
+
+    #[test]
+    fn preview_keeps_footwin_fg_on_top_of_the_candidate() {
+        preview_equals_commit(
+            "env",
+            "",
+            only("FOOTWIN_FG", "#ff0000"),
+            none,
+            "catppuccin-mocha",
+        );
+    }
+
+    #[test]
+    fn preview_resolves_a_user_theme_file_the_way_a_restart_will() {
+        preview_equals_commit(
+            "shadow",
+            "",
+            none,
+            only(
+                "nord",
+                "[colors-dark]\nbackground=010203\nforeground=040506\n",
+            ),
+            "nord",
+        );
+    }
+
+    #[test]
+    fn previewing_a_light_theme_flips_the_variant_too() {
+        preview_equals_commit("light", "", none, none, "gruvbox-light");
+        let (theme, _) = theme_layer("gruvbox-light", &none);
+        let c = compose(&Partial::default(), theme, &none);
+        assert_eq!(c.variant, Variant::Light);
+    }
+
+    #[test]
+    fn the_written_state_file_says_it_is_generated_and_names_the_users_file() {
+        let dir = std::env::temp_dir().join("foothy-test-state");
+        let _ = std::fs::remove_dir_all(&dir);
+        save_theme_in(&dir, "nord").unwrap();
+        let text = std::fs::read_to_string(dir.join(STATE_FILE)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(text.starts_with("# Generated by foothy."), "{text}");
+        assert!(text.contains(USER_FILE), "{text}");
+        assert_eq!(load(only(STATE_FILE, "x"), none, none).problems.len(), 1);
+        let read = move |name: &str| (name == STATE_FILE).then(|| text.clone());
+        let out = load(read, none, none);
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
+        assert_eq!(out.config.colors.background, 0x002e_3440);
+    }
+
+    #[test]
+    fn a_pinned_theme_or_colour_is_announced() {
+        let plain = load(only(USER_FILE, "pad=2\n"), none, none);
+        assert_eq!(plain.pins, Pins::default());
+        assert_eq!(plain.pins.notice(), None);
+
+        let pinned = load(only(USER_FILE, "theme=nord\n"), none, none);
+        let notice = pinned.pins.notice().unwrap();
+        assert!(notice.contains(USER_FILE), "{notice}");
+        assert!(notice.is_ascii(), "{notice}");
+
+        // state.ini is ours, so naming a theme there pins nothing.
+        assert!(
+            !load(only(STATE_FILE, "theme=nord\n"), none, none)
+                .pins
+                .theme_file
+        );
+
+        let env = load(none, none, only("FOOTWIN_BG", "112233"));
+        assert!(env.pins.env_color);
+        assert!(env.pins.notice().unwrap().contains("FOOTWIN"));
+        // An unparsable value pins nothing: it never reaches the colours.
+        assert!(!load(none, none, only("FOOTWIN_BG", "nope")).pins.env_color);
+    }
+
+    #[test]
+    fn the_theme_list_holds_every_bundled_name_plus_the_users_own_once() {
+        let names = theme_names(&["nord".to_string(), "mine".to_string()]);
+        assert_eq!(names.iter().filter(|n| *n == "nord").count(), 1);
+        assert!(names.contains(&"mine".to_string()));
+        assert_eq!(names.len(), config::bundled_names().len() + 1);
+        assert!(names.windows(2).all(|w| w[0] < w[1]));
     }
 
     #[test]
