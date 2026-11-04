@@ -707,7 +707,6 @@ impl App {
         }
     }
 
-    /// The palette runs the same code the shortcut runs; nothing is duplicated.
     fn run_action(&mut self, action: palette::Action, event_loop: &ActiveEventLoop) {
         match action {
             // The state machine answers this one by switching mode.
@@ -724,16 +723,8 @@ impl App {
             }
             palette::Action::ZoomIn => self.zoom(1),
             palette::Action::ZoomOut => self.zoom(-1),
-            palette::Action::ResetZoom => {
-                let base = self.cfg.font_size;
-                self.apply_font_size(base);
-            }
-            palette::Action::ScrollToTop => {
-                if let Some(pane) = self.panes.focused_mut() {
-                    pane.term.scroll(Scroll::Top);
-                }
-                self.redraw_soon();
-            }
+            palette::Action::ResetZoom => self.reset_zoom(),
+            palette::Action::ScrollToTop => self.scroll_focused(Scroll::Top),
         }
     }
 
@@ -771,10 +762,8 @@ impl App {
         if let Some(status) = self.status.clone() {
             notes.push(status);
         }
-        if mode == palette::Mode::Themes
-            && let Some(notice) = self.pins.notice()
-        {
-            notes.push(notice);
+        if mode == palette::Mode::Themes {
+            notes.extend(self.pins.notes());
         }
         notes
     }
@@ -807,6 +796,19 @@ impl App {
         if let Some(pane) = self.panes.focused_mut() {
             pane.term.scroll(Scroll::Bottom);
         }
+    }
+
+    /// Back to the configured size, not to a hardcoded one.
+    fn reset_zoom(&mut self) {
+        let base = self.cfg.font_size;
+        self.apply_font_size(base);
+    }
+
+    fn scroll_focused(&mut self, scroll: Scroll) {
+        if let Some(pane) = self.panes.focused_mut() {
+            pane.term.scroll(scroll);
+        }
+        self.redraw_soon();
     }
 
     fn zoom(&mut self, steps: i32) {
@@ -1172,8 +1174,7 @@ impl ApplicationHandler for App {
                     };
                     if let Some(steps) = zoom {
                         if steps == 0 {
-                            let base = self.cfg.font_size;
-                            self.apply_font_size(base);
+                            self.reset_zoom();
                         } else {
                             self.zoom(steps);
                         }
@@ -1208,10 +1209,7 @@ impl ApplicationHandler for App {
                         _ => None,
                     };
                     if let Some(scroll) = page {
-                        if let Some(pane) = self.panes.focused_mut() {
-                            pane.term.scroll(scroll);
-                        }
-                        self.redraw_soon();
+                        self.scroll_focused(scroll);
                         return;
                     }
                 }
