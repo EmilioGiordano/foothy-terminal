@@ -186,16 +186,27 @@ fn a_line_without_an_equals_sign_is_a_problem_but_not_fatal() {
 }
 
 #[test]
-fn an_unclosed_section_header_is_a_problem_but_not_fatal() {
-    let (p, problems) = parse("[colors-dark\nbackground=1e1e2e\n");
+fn a_rejected_header_does_not_leave_the_previous_section_in_force() {
+    let (p, problems) =
+        parse("[colors-dark]\nbackground=111111\n[colors-light\nbackground=eeeeee\n");
     assert_eq!(problems.len(), 1);
-    // The header was rejected, so the key fell to the section in force.
+    assert_eq!(problems[0].line, 3);
+    assert_eq!(p.dark.background, Some(0x11_1111));
+    assert!(p.light.is_empty());
+}
+
+#[test]
+fn a_header_with_trailing_characters_is_rejected() {
+    let (p, problems) = parse("[colors-dark] oops\nbackground=1e1e2e\n");
+    assert_eq!(problems.len(), 1);
     assert!(p.dark.is_empty());
 }
 
 #[test]
 fn colours_that_are_not_six_hex_digits_are_rejected() {
-    for bad in ["fff", "ffffffff", "zzzzzz", "", "1e1e2", "0x1e1e2e"] {
+    for bad in [
+        "fff", "ffffffff", "zzzzzz", "", "1e1e2", "0x1e1e2e", "#1e1e2e",
+    ] {
         let (p, problems) = parse(&format!("[colors-dark]\nbackground={bad}\n"));
         assert_eq!(problems.len(), 1, "{bad:?} was accepted");
         assert!(p.dark.background.is_none(), "{bad:?}");
