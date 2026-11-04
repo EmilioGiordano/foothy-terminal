@@ -808,7 +808,7 @@ impl ApplicationHandler for App {
         {
             self.hwnd = w.hwnd.get();
             let hwnd = self.hwnd as _;
-            chrome::set_dark_titlebar(hwnd, true);
+            chrome::set_dark_titlebar(hwnd, self.cfg.variant == config::Variant::Dark);
             chrome::set_opacity(hwnd, self.cfg.alpha);
         }
 
