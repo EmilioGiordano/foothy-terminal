@@ -80,6 +80,10 @@ pub fn load(
 
     let theme = match files.settings.theme.as_deref() {
         None => Partial::default(),
+        Some(name) if !is_theme_name(name) => {
+            problems.push(format!("theme '{name}' is not a plain name"));
+            Partial::default()
+        }
         Some(name) => match user_theme(name).or_else(|| bundled(name).map(str::to_string)) {
             Some(text) => {
                 let (partial, found) = parse(&text);
@@ -105,6 +109,12 @@ pub fn load(
         config: resolved.resolve(Variant::Dark),
         problems,
     }
+}
+
+/// A theme is a file people copy from the internet, so it names a file inside
+/// the themes directory and nothing else: no separator, no `..`, no drive.
+fn is_theme_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains(['/', '\\', ':']) && !name.contains("..")
 }
 
 /// A theme may contribute colours and the variant, nothing else. Named field
@@ -331,6 +341,22 @@ mod tests {
         assert_eq!(out.config.variant, Variant::Dark);
         assert_eq!(out.config.colors.background, 0x002b_292d);
         assert!(out.problems.is_empty(), "{:?}", out.problems);
+    }
+
+    #[test]
+    fn a_theme_name_cannot_leave_the_themes_directory() {
+        for name in [
+            r"..\..\Windows\win.ini",
+            r"C:\Windows\win.ini",
+            "C:win.ini",
+            "a/b",
+            "..",
+        ] {
+            let read = move |k: &str| (k == USER_FILE).then(|| format!("theme={name}\n"));
+            let out = load(read, |_| panic!("read a rejected theme name"), none);
+            assert_eq!(out.config.colors.background, BG, "{name}");
+            assert_eq!(out.problems.len(), 1, "{name}: {:?}", out.problems);
+        }
     }
 
     #[test]
