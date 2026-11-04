@@ -119,10 +119,17 @@ const DEVICE_NAMES: [&str; 22] = [
 ];
 
 /// A theme is a file people copy from the internet, so it names a file inside
-/// the themes directory and nothing else: no separator, no `..`, no drive, and
-/// no Windows device.
+/// the themes directory and nothing else. An allowlist, not a blocklist: Win32
+/// still resolves `COM1 .theme` and `CONIN$` to a device, and a trailing space
+/// or a `$` would slip past any list of spellings. Every bundled name fits.
 fn is_theme_name(name: &str) -> bool {
-    if name.is_empty() || name.contains(['/', '\\', ':']) || name.contains("..") {
+    if name.is_empty() || name.starts_with('.') || name.ends_with('.') {
+        return false;
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    {
         return false;
     }
     let stem = name.split('.').next().unwrap_or(name);
@@ -373,11 +380,38 @@ mod tests {
 
     #[test]
     fn a_theme_name_cannot_be_a_windows_device() {
-        for name in ["NUL", "nul", "CON", "COM1", "aux.conf", "LPT9.theme"] {
+        // Every one of these is resolved to a device by Win32, verified with
+        // RtlIsDosDeviceName_U; the trailing space and the `$` forms are why
+        // this is an allowlist and not a list of spellings.
+        for name in [
+            "NUL",
+            "nul",
+            "CON",
+            "COM1",
+            "aux.conf",
+            "LPT9.theme",
+            "COM1 .theme",
+            "aux .conf",
+            "CONIN$",
+            "CONOUT$",
+            "conin$ .",
+            "COM\u{b9}",
+            "LPT\u{b3}.x",
+            ".theme",
+            "nord.",
+        ] {
             let read = move |k: &str| (k == USER_FILE).then(|| format!("theme={name}\n"));
             let out = load(read, |_| panic!("opened a device as a theme"), none);
             assert_eq!(out.config.colors.background, BG, "{name}");
             assert_eq!(out.problems.len(), 1, "{name}: {:?}", out.problems);
+        }
+    }
+
+    /// The allowlist must not outgrow the catalogue it has to admit.
+    #[test]
+    fn every_bundled_theme_name_is_accepted() {
+        for name in config::bundled_names() {
+            assert!(is_theme_name(name), "{name} rejected");
         }
     }
 
