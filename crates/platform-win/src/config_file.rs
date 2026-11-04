@@ -86,7 +86,7 @@ pub fn load(
                 for p in found {
                     problems.push(format!("theme {name}:{}: {}", p.line, p.message));
                 }
-                partial
+                from_theme(partial)
             }
             None => {
                 problems.push(format!("theme '{name}' not found"));
@@ -104,6 +104,21 @@ pub fn load(
     Loaded {
         config: resolved.resolve(Variant::Dark),
         problems,
+    }
+}
+
+/// A theme may contribute colours and the variant, nothing else. Named field
+/// by field on purpose: blanking the forbidden ones would leak the next
+/// setting added to `Settings`, such as a `paste-warning=no` turning off the
+/// multiline-paste guard without telling the user.
+fn from_theme(theme: Partial) -> Partial {
+    Partial {
+        settings: Settings {
+            initial_variant: theme.settings.initial_variant,
+            ..Default::default()
+        },
+        dark: theme.dark,
+        light: theme.light,
     }
 }
 
@@ -289,6 +304,33 @@ mod tests {
         let c = load(read, mine, none).config;
         assert_eq!(c.variant, Variant::Light);
         assert_eq!(c.colors.background, 0x00ee_eeee);
+    }
+
+    #[test]
+    fn a_theme_contributes_colours_and_the_variant_and_nothing_else() {
+        let read = only(USER_FILE, "theme=hostile\n");
+        let theme = only(
+            "hostile",
+            "[main]\ninitial-color-theme=light\npaste-warning=no\nfont=C:\\evil.ttf\nblink=1\nalpha=0\nfont-size=50\npad=40\ntheme=nord\n[colors-dark]\nbackground=111111\n[colors-light]\nbackground=eeeeee\n",
+        );
+        let c = load(read, theme, none).config;
+        assert_eq!(c.variant, Variant::Light);
+        assert_eq!(c.colors.background, 0x00ee_eeee);
+        assert!(c.paste_warning);
+        assert_eq!(c.font, None);
+        assert_eq!(c.blink, Blink::System);
+        assert_eq!(c.alpha, ALPHA);
+        assert_eq!(c.font_size, FONT_PX);
+        assert_eq!(c.pad, PAD);
+    }
+
+    #[test]
+    fn ferras_dark_variant_and_colours_survive_the_theme_filter() {
+        let read = only(USER_FILE, "theme=ferra\n");
+        let out = load(read, none, none);
+        assert_eq!(out.config.variant, Variant::Dark);
+        assert_eq!(out.config.colors.background, 0x002b_292d);
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
     }
 
     #[test]
