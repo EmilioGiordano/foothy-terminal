@@ -136,6 +136,9 @@ impl Palette {
             Key::Down => self.step(1),
             Key::Home => self.jump(0),
             Key::End => self.jump(self.matches.len().saturating_sub(1)),
+            // winit reports Ctrl+letter as a control character; it would fill
+            // the filter with something undrawable that matches nothing.
+            Key::Char(c) if c.is_control() => Outcome::Stay,
             Key::Char(c) => {
                 self.filter.push(c);
                 self.refilter();
@@ -356,6 +359,14 @@ mod tests {
         }
         assert_eq!(p.filter(), "");
         assert_eq!(labels(&p, 50).len(), COMMANDS.len());
+    }
+
+    #[test]
+    fn a_control_character_never_reaches_the_filter() {
+        let mut p = Palette::commands(many(3), None);
+        type_str(&mut p, "zoom");
+        assert_eq!(p.key(Key::Char('\u{1}')), Outcome::Stay);
+        assert_eq!(p.filter(), "zoom");
     }
 
     #[test]
