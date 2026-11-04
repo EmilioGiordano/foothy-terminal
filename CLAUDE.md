@@ -27,6 +27,8 @@ cargo run -p platform-win --bin keytest -- win32 # what actually reaches PSReadL
 cargo run -p render --example coverage           # which glyphs the font has
 ```
 
+Configuration lives in `%APPDATA%\foothy\foothy.ini`, in foot's own ini format, with the 86 foot themes embedded in the binary and named rather than pathed. Precedence, lowest to highest: `defaults < state.ini < foothy.ini < FOOTWIN_*`. The app never writes `foothy.ini`; only `state.ini` is its own.
+
 Runtime tuning, no rebuild: `FOOTWIN_FONT`, `FOOTWIN_FONT_PX`, `FOOTWIN_PAD`, `FOOTWIN_FG`, `FOOTWIN_BG`, `FOOTWIN_ALPHA`, `FOOTWIN_BLINK`, `FOOTWIN_PASTE_WARN`.
 
 ## Architecture: the layer rule
@@ -38,6 +40,7 @@ This is the one thing to understand before changing anything.
 | `vt-core` | 1 | VT parser, grid, scrollback, PTY, selection state |
 | `render` | 2 | Glyph cache, grid → pixel buffer |
 | `layout` | 2 | Pane tree: split, close, resize, directional navigation |
+| `config` | 2 | ini parsing, the bundled themes, precedence merging |
 | `input` | 2.5 | Key → bytes, win32-input-mode, paste safety |
 | `platform-win` | 3 | winit, softbuffer, Win32 clipboard and window chrome |
 
