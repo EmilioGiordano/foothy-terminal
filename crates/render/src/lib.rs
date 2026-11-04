@@ -30,38 +30,6 @@ fn rgb(r: u8, g: u8, b: u8) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | b as u32
 }
 
-fn build_palette() -> [u32; 256] {
-    let mut p = [0u32; 256];
-    const BASE: [u32; 16] = [
-        0x0024_2424,
-        0x00f6_2b5a,
-        0x0047_b413,
-        0x00e3_c401,
-        0x0024_acd4,
-        0x00f2_affd,
-        0x0013_c299,
-        0x00e6_e6e6,
-        0x0061_6161,
-        0x00ff_4d51,
-        0x0035_d450,
-        0x00e9_e836,
-        0x005d_c5f8,
-        0x00fe_abf2,
-        0x0024_dfc4,
-        0x00ff_ffff,
-    ];
-    p[..16].copy_from_slice(&BASE);
-    const STEPS: [u8; 6] = [0, 95, 135, 175, 215, 255];
-    for i in 0..216 {
-        p[16 + i] = rgb(STEPS[i / 36], STEPS[(i / 6) % 6], STEPS[i % 6]);
-    }
-    for i in 0..24 {
-        let v = 8 + i as u8 * 10;
-        p[232 + i] = rgb(v, v, v);
-    }
-    p
-}
-
 struct Glyph {
     width: usize,
     height: usize,
@@ -103,7 +71,8 @@ impl Renderer {
             cell_w,
             cell_h,
             baseline,
-            palette: build_palette(),
+            // The theme is the caller's: this layer only knows pixels.
+            palette: [0; 256],
             glyphs: HashMap::new(),
             pad: 0,
             fg: DEFAULT_FG,
@@ -145,6 +114,10 @@ impl Renderer {
     pub fn set_colors(&mut self, fg: u32, bg: u32) {
         self.fg = fg;
         self.bg = bg;
+    }
+
+    pub fn set_palette(&mut self, palette: &[u32; 256]) {
+        self.palette = *palette;
     }
 
     pub fn header_height(&self) -> usize {
@@ -927,18 +900,18 @@ mod tests {
     }
 
     #[test]
-    fn palette_matches_foot_defaults() {
-        // upstream/foot/config.c:33-86
-        let r = renderer();
-        assert_eq!(DEFAULT_FG, 0x00ff_ffff);
-        assert_eq!(DEFAULT_BG, 0x0024_2424);
-        assert_eq!(r.palette[0], 0x0024_2424, "negro de foot es el fondo");
-        assert_eq!(r.palette[1], 0x00f6_2b5a, "rojo de foot");
-        assert_eq!(r.palette[15], 0x00ff_ffff);
-        // cubo 6x6x6 y rampa de grises, iguales a xterm y a foot
-        assert_eq!(r.palette[16], 0x0000_0000);
-        assert_eq!(r.palette[231], 0x00ff_ffff);
-        assert_eq!(r.palette[232], 0x0008_0808);
-        assert_eq!(r.palette[255], 0x00ee_eeee);
+    fn an_installed_palette_resolves_indexed_colors() {
+        let mut r = renderer();
+        let mut p = [0u32; 256];
+        p[5] = 0x0012_3456;
+        p[200] = 0x00ab_cdef;
+        r.set_palette(&p);
+        assert_eq!(r.resolve(Color::Indexed(5), DEFAULT_FG), 0x0012_3456);
+        assert_eq!(r.resolve(Color::Indexed(200), DEFAULT_FG), 0x00ab_cdef);
+        r.set_colors(0x0011_1111, 0x0022_2222);
+        assert_eq!(
+            r.resolve(Color::Named(NamedColor::Foreground), DEFAULT_FG),
+            0x0011_1111
+        );
     }
 }
