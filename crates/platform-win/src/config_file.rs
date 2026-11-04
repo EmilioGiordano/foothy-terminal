@@ -111,10 +111,22 @@ pub fn load(
     }
 }
 
+/// Reserved on Windows in every directory and with any extension. Opening one
+/// reaches the device, and a serial port can block the read instead of failing.
+const DEVICE_NAMES: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
 /// A theme is a file people copy from the internet, so it names a file inside
-/// the themes directory and nothing else: no separator, no `..`, no drive.
+/// the themes directory and nothing else: no separator, no `..`, no drive, and
+/// no Windows device.
 fn is_theme_name(name: &str) -> bool {
-    !name.is_empty() && !name.contains(['/', '\\', ':']) && !name.contains("..")
+    if name.is_empty() || name.contains(['/', '\\', ':']) || name.contains("..") {
+        return false;
+    }
+    let stem = name.split('.').next().unwrap_or(name);
+    !DEVICE_NAMES.iter().any(|d| stem.eq_ignore_ascii_case(d))
 }
 
 /// A theme may contribute colours and the variant, nothing else. Named field
@@ -354,6 +366,16 @@ mod tests {
         ] {
             let read = move |k: &str| (k == USER_FILE).then(|| format!("theme={name}\n"));
             let out = load(read, |_| panic!("read a rejected theme name"), none);
+            assert_eq!(out.config.colors.background, BG, "{name}");
+            assert_eq!(out.problems.len(), 1, "{name}: {:?}", out.problems);
+        }
+    }
+
+    #[test]
+    fn a_theme_name_cannot_be_a_windows_device() {
+        for name in ["NUL", "nul", "CON", "COM1", "aux.conf", "LPT9.theme"] {
+            let read = move |k: &str| (k == USER_FILE).then(|| format!("theme={name}\n"));
+            let out = load(read, |_| panic!("opened a device as a theme"), none);
             assert_eq!(out.config.colors.background, BG, "{name}");
             assert_eq!(out.problems.len(), 1, "{name}: {:?}", out.problems);
         }
