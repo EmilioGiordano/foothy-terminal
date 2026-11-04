@@ -5,7 +5,7 @@
 mod chrome;
 mod clipboard;
 mod config_file;
-#[cfg_attr(not(test), expect(dead_code))]
+mod overlay;
 mod palette;
 mod panes;
 
@@ -22,7 +22,7 @@ use panes::{DIVIDER_DRAW, Panes};
 use render::{CursorLook, Renderer};
 use vt_core::{CursorShape, Scroll, SelectionType, Side, TermEvent, TermSize};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WKey, NamedKey};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -119,6 +119,25 @@ fn arrow_zone(key: &WKey) -> Option<DropZone> {
         WKey::Named(NamedKey::ArrowDown) => Some(DropZone::Bottom),
         _ => None,
     }
+}
+
+/// Keys the palette answers to. Everything else becomes filter text, and a
+/// control character is dropped here: Tab and Ctrl+letter arrive as text too,
+/// and neither matches nor draws.
+fn palette_key(key: &WKey, text: Option<&str>) -> Option<palette::Key> {
+    Some(match key {
+        WKey::Named(NamedKey::ArrowUp) => palette::Key::Up,
+        WKey::Named(NamedKey::ArrowDown) => palette::Key::Down,
+        WKey::Named(NamedKey::Home) => palette::Key::Home,
+        WKey::Named(NamedKey::End) => palette::Key::End,
+        WKey::Named(NamedKey::Enter) => palette::Key::Enter,
+        WKey::Named(NamedKey::Escape) => palette::Key::Esc,
+        WKey::Named(NamedKey::Backspace) => palette::Key::Backspace,
+        _ => {
+            let c = text?.chars().next().filter(|c| !c.is_control())?;
+            palette::Key::Char(c)
+        }
+    })
 }
 
 fn arrow_direction(key: &WKey) -> Option<Direction> {
@@ -227,7 +246,28 @@ struct App {
     blink: Option<Duration>,
     blink_on: bool,
     blink_since: Instant,
+    /// The look currently painted, which a preview replaces and Esc restores.
     cfg: config::Config,
+    /// state.ini and foothy.ini without a theme under them: a preview composes
+    /// from this, so the user's own colours stay on top of the candidate.
+    files: config::Partial,
+    pins: config_file::Pins,
+    current_theme: Option<String>,
+    /// ~86 theme files: built on the first open and kept, so opening the
+    /// palette stays bounded work (docs/02 §3 rule 7).
+    themes: Option<overlay::ThemeList>,
+    open: Option<Opened>,
+    /// Shown in the palette footer. A failed write has nowhere else to go:
+    /// stderr is gone in release (windows_subsystem).
+    status: Option<String>,
+}
+
+struct Opened {
+    palette: palette::Palette,
+    /// Restored by Esc, including the titlebar variant.
+    saved: config::Config,
+    /// Last previewed theme, so a repeated index does not repaint.
+    shown: Option<usize>,
 }
 
 /// A file that exists is not a font, so both the read and the parse fall back.
@@ -251,6 +291,7 @@ impl App {
             eprintln!("foothy: {problem}");
         }
         let cfg = loaded.config;
+        let current_theme = loaded.files.settings.theme.clone();
 
         let mut renderer = build_renderer(cfg.font.as_deref(), cfg.font_size, &cfg.colors.palette)?;
         renderer.set_padding(cfg.pad as usize);
@@ -296,6 +337,12 @@ impl App {
             blink_on: true,
             blink_since: Instant::now(),
             cfg,
+            files: loaded.files,
+            pins: loaded.pins,
+            current_theme,
+            themes: None,
+            open: None,
+            status: None,
         })
     }
 
@@ -517,6 +564,221 @@ impl App {
         }
     }
 
+    /// Copying clears the selection, like foot. Shared by Ctrl+C, Ctrl+Shift+C
+    /// and the palette, so they cannot drift apart.
+    fn copy(&mut self) -> bool {
+        if !self.copy_selection() {
+            return false;
+        }
+        if let Some(pane) = self.panes.focused_mut() {
+            pane.term.clear_selection();
+        }
+        self.redraw_soon();
+        true
+    }
+
+    fn theme_list(&mut self) -> &overlay::ThemeList {
+        self.themes.get_or_insert_with(|| {
+            let (list, problems) = overlay::ThemeList::build();
+            for problem in problems {
+                eprintln!("foothy: {problem}");
+            }
+            list
+        })
+    }
+
+    fn open_palette(&mut self) {
+        if self.open.is_some() {
+            return;
+        }
+        // The guard swallows the button release, so anything armed by the
+        // mouse would resume once the palette closes.
+        self.dragging = None;
+        self.moving = None;
+        self.preview = None;
+        self.selecting = false;
+        self.set_cursor(CursorIcon::Default);
+
+        let current = self.current_theme.clone();
+        let entries = self.theme_list().entries.clone();
+        self.open = Some(Opened {
+            palette: palette::Palette::commands(entries, current.as_deref()),
+            saved: self.cfg.clone(),
+            shown: None,
+        });
+        self.redraw_soon();
+    }
+
+    /// Composed through the same function `load` uses, so what a preview
+    /// paints is what Enter will commit.
+    fn composed(&self, theme: config::Partial) -> config::Config {
+        config_file::compose(&self.files, theme, &|k| std::env::var(k).ok())
+    }
+
+    fn apply_look(&mut self, cfg: &config::Config) {
+        self.renderer
+            .set_colors(cfg.colors.foreground, cfg.colors.background);
+        self.renderer.set_palette(&cfg.colors.palette);
+        if self.hwnd != 0 {
+            chrome::set_dark_titlebar(self.hwnd as _, cfg.variant == config::Variant::Dark);
+        }
+    }
+
+    fn show_theme(&mut self, i: usize) {
+        let Some(layer) = self.themes.as_ref().map(|l| l.layers[i].clone()) else {
+            return;
+        };
+        let cfg = self.composed(layer);
+        self.apply_look(&cfg);
+        self.cfg = cfg;
+    }
+
+    fn close_palette(&mut self, restore: bool) {
+        let Some(open) = self.open.take() else {
+            return;
+        };
+        if restore && open.shown.is_some() {
+            self.apply_look(&open.saved);
+            self.cfg = open.saved;
+        }
+        self.redraw_soon();
+    }
+
+    fn palette_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
+        let text = event.text.as_ref().map(|s| s.as_str());
+        let Some(key) = palette_key(&event.logical_key, text) else {
+            return;
+        };
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        let outcome = open.palette.key(key);
+        self.palette_outcome(outcome, event_loop);
+    }
+
+    fn palette_wheel(&mut self, down: bool, event_loop: &ActiveEventLoop) {
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        let outcome = open.palette.wheel(down);
+        self.palette_outcome(outcome, event_loop);
+    }
+
+    fn palette_outcome(&mut self, outcome: palette::Outcome, event_loop: &ActiveEventLoop) {
+        match outcome {
+            palette::Outcome::Stay => self.redraw_soon(),
+            palette::Outcome::Preview(i) => {
+                // Backspace on an empty filter and the wheel at its clamp both
+                // repeat the index; repainting the window for that is waste.
+                let repeat = self.open.as_ref().is_some_and(|o| o.shown == Some(i));
+                if !repeat {
+                    if let Some(open) = self.open.as_mut() {
+                        open.shown = Some(i);
+                    }
+                    self.show_theme(i);
+                }
+                self.redraw_soon();
+            }
+            palette::Outcome::Commit(i) => {
+                let name = self.themes.as_ref().map(|l| l.entries[i].name.clone());
+                self.show_theme(i);
+                self.open = None;
+                if let Some(name) = name {
+                    self.current_theme = Some(name.clone());
+                    self.status = match config_file::save_theme(&name) {
+                        Ok(()) => None,
+                        Err(e) => {
+                            eprintln!("foothy: could not write {}: {e}", config_file::STATE_FILE);
+                            Some(format!(
+                                "Could not save {}: the theme applies to this session only.",
+                                config_file::STATE_FILE
+                            ))
+                        }
+                    };
+                }
+                self.redraw_soon();
+            }
+            palette::Outcome::Run(action) => {
+                // Closed first: paste opens a modal, and Close may exit.
+                self.close_palette(true);
+                self.run_action(action, event_loop);
+            }
+            palette::Outcome::Cancel => self.close_palette(true),
+        }
+    }
+
+    /// The palette runs the same code the shortcut runs; nothing is duplicated.
+    fn run_action(&mut self, action: palette::Action, event_loop: &ActiveEventLoop) {
+        match action {
+            // The state machine answers this one by switching mode.
+            palette::Action::SelectTheme => {}
+            palette::Action::SplitRight => self.split(DropZone::Right),
+            palette::Action::SplitDown => self.split(DropZone::Bottom),
+            palette::Action::ClosePane => self.close_focused(event_loop),
+            palette::Action::Copy => {
+                self.copy();
+            }
+            palette::Action::Paste => {
+                self.paste();
+                self.redraw_soon();
+            }
+            palette::Action::ZoomIn => self.zoom(1),
+            palette::Action::ZoomOut => self.zoom(-1),
+            palette::Action::ResetZoom => {
+                let base = self.cfg.font_size;
+                self.apply_font_size(base);
+            }
+            palette::Action::ScrollToTop => {
+                if let Some(pane) = self.panes.focused_mut() {
+                    pane.term.scroll(Scroll::Top);
+                }
+                self.redraw_soon();
+            }
+        }
+    }
+
+    /// While the palette is open nothing reaches the panes or the PTY. Returns
+    /// true when the event was the palette's.
+    fn palette_event(&mut self, event: &WindowEvent, event_loop: &ActiveEventLoop) -> bool {
+        match event {
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Pressed {
+                    self.palette_key(event, event_loop);
+                }
+                true
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let down = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => *y < 0.0,
+                    MouseScrollDelta::PixelDelta(p) => p.y < 0.0,
+                };
+                self.palette_wheel(down, event_loop);
+                true
+            }
+            WindowEvent::MouseInput { .. } => true,
+            WindowEvent::CursorMoved { position, .. } => {
+                self.mouse = (position.x, position.y);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The pin notice belongs with the theme list, where it is read before
+    /// Enter: after a commit the palette is gone and nobody would see it.
+    fn palette_notes(&self, mode: palette::Mode) -> Vec<String> {
+        let mut notes = Vec::new();
+        if let Some(status) = self.status.clone() {
+            notes.push(status);
+        }
+        if mode == palette::Mode::Themes
+            && let Some(notice) = self.pins.notice()
+        {
+            notes.push(notice);
+        }
+        notes
+    }
+
     fn paste(&mut self) {
         let Some(text) = clipboard::get_text() else {
             return;
@@ -620,6 +882,11 @@ impl App {
             .as_ref()
             .map(|p| (p.rect(), p.alpha(), p.outline_alpha()));
         let hover_close = self.hover_close;
+        let notes = self
+            .open
+            .as_ref()
+            .map(|o| self.palette_notes(o.palette.mode()))
+            .unwrap_or_default();
         let close_glyph = self.close_glyph.to_string();
         let focus_glyph = self.focus_glyph;
 
@@ -746,6 +1013,20 @@ impl App {
                 .outline_area(&mut buffer, w, h, area, DROP_TINT, outline);
         }
 
+        if let Some(open) = self.open.as_ref()
+            && let Some(list) = self.themes.as_ref()
+        {
+            overlay::draw(
+                &mut self.renderer,
+                &mut buffer,
+                (w, h),
+                &open.palette,
+                list,
+                &self.cfg,
+                &notes,
+            );
+        }
+
         let _ = buffer.present();
         self.dirty = false;
     }
@@ -775,9 +1056,9 @@ impl ApplicationHandler for App {
             && let RawWindowHandle::Win32(w) = handle.as_raw()
         {
             self.hwnd = w.hwnd.get();
-            let hwnd = self.hwnd as _;
-            chrome::set_dark_titlebar(hwnd, self.cfg.variant == config::Variant::Dark);
-            chrome::set_opacity(hwnd, self.cfg.alpha);
+            let cfg = self.cfg.clone();
+            self.apply_look(&cfg);
+            chrome::set_opacity(self.hwnd as _, cfg.alpha);
         }
 
         self.blink = match self.cfg.blink {
@@ -810,6 +1091,9 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        if self.open.is_some() && self.palette_event(&event, event_loop) {
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
@@ -871,6 +1155,12 @@ impl ApplicationHandler for App {
                         self.close_focused(event_loop);
                         return;
                     }
+                    if let WKey::Character(c) = &event.logical_key
+                        && c.eq_ignore_ascii_case("p")
+                    {
+                        self.open_palette();
+                        return;
+                    }
                 }
 
                 if self.mods.ctrl {
@@ -896,11 +1186,7 @@ impl ApplicationHandler for App {
                         WKey::Character(c) if c.eq_ignore_ascii_case("c") => {
                             // Ctrl+C only copies when there is a selection;
                             // otherwise it must stay SIGINT.
-                            if (self.mods.shift || has_selection) && self.copy_selection() {
-                                if let Some(pane) = self.panes.focused_mut() {
-                                    pane.term.clear_selection();
-                                }
-                                self.redraw_soon();
+                            if (self.mods.shift || has_selection) && self.copy() {
                                 return;
                             }
                         }
@@ -1325,6 +1611,29 @@ mod tests {
             Some(DropZone::Bottom)
         );
         assert_eq!(arrow_zone(&WKey::Named(NamedKey::Enter)), None);
+    }
+
+    #[test]
+    fn the_palette_takes_its_keys_and_turns_the_rest_into_filter_text() {
+        let named = |n: NamedKey| palette_key(&WKey::Named(n), None);
+        assert_eq!(named(NamedKey::ArrowUp), Some(palette::Key::Up));
+        assert_eq!(named(NamedKey::ArrowDown), Some(palette::Key::Down));
+        assert_eq!(named(NamedKey::Home), Some(palette::Key::Home));
+        assert_eq!(named(NamedKey::End), Some(palette::Key::End));
+        assert_eq!(named(NamedKey::Enter), Some(palette::Key::Enter));
+        assert_eq!(named(NamedKey::Escape), Some(palette::Key::Esc));
+        assert_eq!(named(NamedKey::Backspace), Some(palette::Key::Backspace));
+
+        let typed = |s: &str| palette_key(&WKey::Character(s.into()), Some(s));
+        assert_eq!(typed("n"), Some(palette::Key::Char('n')));
+        assert_eq!(
+            palette_key(&WKey::Named(NamedKey::Space), Some(" ")),
+            Some(palette::Key::Char(' '))
+        );
+        // Tab and Ctrl+letter both arrive as a control character.
+        assert_eq!(palette_key(&WKey::Named(NamedKey::Tab), Some("\t")), None);
+        assert_eq!(typed("\u{1}"), None);
+        assert_eq!(palette_key(&WKey::Named(NamedKey::F5), None), None);
     }
 
     #[test]
