@@ -29,20 +29,27 @@ pub struct Loaded {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Pins {
     pub theme_file: bool,
-    pub env_color: bool,
+    pub env_fg: bool,
+    pub env_bg: bool,
 }
 
 impl Pins {
-    pub fn notice(&self) -> Option<String> {
-        let what = match (self.theme_file, self.env_color) {
-            (true, true) => "theme= in foothy.ini and FOOTWIN_FG/BG",
-            (true, false) => "theme= in foothy.ini",
-            (false, true) => "FOOTWIN_FG/BG",
-            (false, false) => return None,
-        };
-        Some(format!(
-            "Note: {what} wins at startup, so this pick lasts for this session only."
-        ))
+    /// One short line per pin: the palette clips a long one, and the clipped
+    /// tail is the part that says the pick will not stick.
+    pub fn notes(&self) -> Vec<String> {
+        let mut notes = Vec::new();
+        if self.theme_file {
+            notes.push(format!(
+                "Note: {USER_FILE} sets theme=, so this pick lasts this session only."
+            ));
+        }
+        if self.env_fg {
+            notes.push("Note: FOOTWIN_FG overrides the theme's foreground.".to_string());
+        }
+        if self.env_bg {
+            notes.push("Note: FOOTWIN_BG overrides the theme's background.".to_string());
+        }
+        notes
     }
 }
 
@@ -139,7 +146,8 @@ pub fn load(
     let user = layer(USER_FILE, &mut problems);
     let pins = Pins {
         theme_file: user.settings.theme.is_some(),
-        env_color: hex(&env, "FOOTWIN_FG").is_some() || hex(&env, "FOOTWIN_BG").is_some(),
+        env_fg: hex(&env, "FOOTWIN_FG").is_some(),
+        env_bg: hex(&env, "FOOTWIN_BG").is_some(),
     };
     let files = merge(state, user);
 
@@ -593,12 +601,13 @@ mod tests {
     fn a_pinned_theme_or_colour_is_announced() {
         let plain = load(only(USER_FILE, "pad=2\n"), none, none);
         assert_eq!(plain.pins, Pins::default());
-        assert_eq!(plain.pins.notice(), None);
+        assert!(plain.pins.notes().is_empty());
 
         let pinned = load(only(USER_FILE, "theme=nord\n"), none, none);
-        let notice = pinned.pins.notice().unwrap();
-        assert!(notice.contains(USER_FILE), "{notice}");
-        assert!(notice.is_ascii(), "{notice}");
+        let notes = pinned.pins.notes();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains(USER_FILE), "{}", notes[0]);
+        assert!(notes[0].contains("session"), "{}", notes[0]);
 
         // state.ini is ours, so naming a theme there pins nothing.
         assert!(
@@ -607,11 +616,37 @@ mod tests {
                 .theme_file
         );
 
+        // A pinned colour still lets the pick stick: only that one colour is
+        // overridden, now and on restart.
         let env = load(none, none, only("FOOTWIN_BG", "112233"));
-        assert!(env.pins.env_color);
-        assert!(env.pins.notice().unwrap().contains("FOOTWIN"));
+        assert!(env.pins.env_bg && !env.pins.env_fg);
+        let notes = env.pins.notes();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("FOOTWIN_BG"), "{}", notes[0]);
+        assert!(!notes[0].contains("session"), "{}", notes[0]);
+
         // An unparsable value pins nothing: it never reaches the colours.
-        assert!(!load(none, none, only("FOOTWIN_BG", "nope")).pins.env_color);
+        assert!(!load(none, none, only("FOOTWIN_BG", "nope")).pins.env_bg);
+    }
+
+    /// The box clips a long line, and the tail is the part that matters.
+    #[test]
+    fn every_notice_fits_the_palette_and_is_ascii() {
+        for bits in 0..8 {
+            let pins = Pins {
+                theme_file: bits & 1 != 0,
+                env_fg: bits & 2 != 0,
+                env_bg: bits & 4 != 0,
+            };
+            for note in pins.notes() {
+                assert!(note.is_ascii(), "{note}");
+                assert!(
+                    note.chars().count() <= crate::overlay::MAX_COLS - 2,
+                    "{} chars: {note}",
+                    note.chars().count()
+                );
+            }
+        }
     }
 
     #[test]
