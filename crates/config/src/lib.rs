@@ -1,15 +1,9 @@
-//! Reading of `foothy.ini` and of foot-format colour themes.
-//!
-//! Layer 2: no OS, no file system. The caller reads the bytes and hands over
-//! the text; this crate only parses, merges and resolves.
-
 mod ini;
 mod theme;
 
 pub use ini::{Problem, parse};
 pub use theme::{bundled, bundled_names};
 
-/// Which of a theme's two colour sets is wanted.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Variant {
     Dark,
@@ -27,7 +21,6 @@ impl Variant {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Blink {
-    /// The platform decides; it already honours the accessibility preference.
     System,
     Off,
     Ms(u64),
@@ -47,7 +40,6 @@ pub struct SelectionColors {
     pub background: u32,
 }
 
-/// One colour variant as a file gave it: every field optional, so layers merge.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PartialColors {
     pub foreground: Option<u32>,
@@ -82,7 +74,6 @@ impl PartialColors {
             && self.palette.iter().all(Option::is_none)
     }
 
-    /// True when all of `regular0..7` and `bright0..7` are present.
     pub fn has_all_16(&self) -> bool {
         self.palette[..16].iter().all(Option::is_some)
     }
@@ -134,7 +125,6 @@ impl Settings {
     }
 }
 
-/// One parsed file, or one layer of precedence.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Partial {
     pub settings: Settings,
@@ -151,7 +141,6 @@ pub fn merge(base: Partial, over: Partial) -> Partial {
     }
 }
 
-/// The resolved colours: no holes left.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Colors {
     pub foreground: u32,
@@ -171,7 +160,6 @@ impl Colors {
     }
 }
 
-/// The resolved configuration a platform layer can run on.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Config {
     pub font: Option<String>,
