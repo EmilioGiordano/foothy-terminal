@@ -1,6 +1,3 @@
-//! Draws the command palette with the primitives render already has, and
-//! builds the theme list it shows.
-
 use config::{Config, Partial, Variant};
 use render::Renderer;
 
@@ -9,13 +6,12 @@ use crate::palette::{Half, Mode, Palette, ThemeEntry};
 
 /// Enough cells to recognise a theme: background, foreground and four hues.
 pub const SWATCH: usize = 6;
-const MAX_COLS: usize = 76;
+pub const MAX_COLS: usize = 76;
 const MAX_ROWS: usize = 18;
-/// Filter line plus footer.
 const CHROME_LINES: usize = 2;
 
-/// The catalogue, built once. Each theme's resolved layer is kept so a preview
-/// never re-reads a file, and its colours so the list can be scanned.
+/// Built once and kept: ~86 files, and work per event-loop turn is bounded
+/// (docs/02 §3 rule 7). The resolved layer is kept so a preview never re-reads.
 pub struct ThemeList {
     pub entries: Vec<ThemeEntry>,
     pub layers: Vec<Partial>,
@@ -86,10 +82,8 @@ pub fn layout(
     }
     let lines_chrome = CHROME_LINES + notes;
     let cols = (w / cw).saturating_sub(4).min(MAX_COLS);
-    let rows = (h / ch)
-        .saturating_sub(lines_chrome + 2)
-        .min(MAX_ROWS)
-        .min(wanted_rows.max(1));
+    let fits = (h / ch).saturating_sub(lines_chrome + 2).min(MAX_ROWS);
+    let rows = fits.min(wanted_rows.max(1));
     if cols < 16 || rows == 0 {
         return None;
     }
@@ -99,7 +93,9 @@ pub fn layout(
     let box_w = cols * cw + 2 * pad_x;
     let box_h = (rows + lines_chrome) * ch + 2 * pad_y;
     let x = w.saturating_sub(box_w) / 2;
-    let y = h.saturating_sub(box_h) / 2;
+    // Placed as if the list were full, so the filter line does not move up the
+    // window as typing narrows the list.
+    let y = h.saturating_sub((fits + lines_chrome) * ch + 2 * pad_y) / 2;
     Some(Layout {
         rows,
         cols,
@@ -225,7 +221,13 @@ pub fn draw(
         if let Some(i) = row.theme {
             let swatch_x = tag_x.saturating_sub((SWATCH + 1) * cw);
             for (k, color) in list.swatches[i].iter().enumerate() {
-                r.fill_area(buf, w, h, (swatch_x + k * cw, y + 1, cw, ch - 2), *color);
+                r.fill_area(
+                    buf,
+                    w,
+                    h,
+                    (swatch_x + k * cw, y + 1, cw, ch.saturating_sub(2)),
+                    *color,
+                );
             }
             label_end = swatch_x;
         }
@@ -383,7 +385,12 @@ mod tests {
         r.set_colors(cfg.colors.foreground, cfg.colors.background);
         r.set_palette(&cfg.colors.palette);
         r.clear(&mut buf);
-        let notes = vec!["Note: theme= in foothy.ini wins at startup.".to_string()];
+        let notes = config_file::Pins {
+            theme_file: true,
+            env_fg: true,
+            env_bg: true,
+        }
+        .notes();
         draw(&mut r, &mut buf, (w, h), &p, &list, &cfg, &notes);
 
         let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
