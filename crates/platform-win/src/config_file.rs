@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn a_light_only_theme_is_not_hidden_by_our_own_colours() {
+    fn a_bundled_light_theme_resolves_to_light() {
         let read = only(USER_FILE, "theme=gruvbox-light\n");
         let c = load(read, none, none).config;
         assert_eq!(c.variant, Variant::Light);
