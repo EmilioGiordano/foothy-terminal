@@ -185,7 +185,11 @@ fn main_key(out: &mut Partial, key: &str, value: &str) -> Result<(), String> {
             s.initial_variant = Some(match value.to_ascii_lowercase().as_str() {
                 "dark" | "1" => Variant::Dark,
                 "light" | "2" => Variant::Light,
-                _ => return Err(format!("initial-color-theme '{value}' is not dark or light")),
+                _ => {
+                    return Err(format!(
+                        "initial-color-theme '{value}' is not dark or light"
+                    ));
+                }
             })
         }
         _ => {}
