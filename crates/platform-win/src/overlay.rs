@@ -178,8 +178,9 @@ pub fn draw(
 
     let inner_w = l.cols * cw;
     let text_x = l.text_x;
-    // The last cell column is the marker track, so no label runs under it.
-    let list_cols = l.cols.saturating_sub(1);
+    // The last two cell columns hold the marker track and the gap before it,
+    // so no label or tag runs under the marker.
+    let list_cols = l.cols.saturating_sub(2);
 
     r.draw_text(
         buf,
@@ -195,7 +196,7 @@ pub fn draw(
     r.fill_area(buf, w, h, (text_x, l.rows_y - 1, inner_w, 1), look.dim);
 
     let track_w = (cw / 3).max(2);
-    let track_x = text_x + list_cols * cw + cw.saturating_sub(track_w) / 2;
+    let track_x = text_x + (l.cols - 1) * cw + cw.saturating_sub(track_w) / 2;
     if marker.is_some() {
         r.fill_area(
             buf,
@@ -318,6 +319,80 @@ mod tests {
         let mocha = at("catppuccin-mocha");
         assert_eq!(list.swatches[mocha][0], 0x001e_1e2e);
         assert_eq!(list.swatches[mocha][1], 0x00cd_d6f4);
+    }
+
+    fn renderer() -> Option<Renderer> {
+        let bytes = std::fs::read(r"C:\Windows\Fonts\CascadiaMono.ttf").ok()?;
+        Renderer::new(&bytes, 16.0).ok()
+    }
+
+    /// Drawing is where an index can go out of range: the swatch, the marker
+    /// and the right-aligned tag all derive their x from the box width.
+    #[test]
+    fn drawing_paints_inside_the_box_and_never_panics() {
+        let Some(mut r) = renderer() else {
+            return;
+        };
+        let (list, _) = ThemeList::build();
+        let cfg = Config::default();
+        let (w, h) = (1200usize, 800usize);
+
+        for win in [(w, h), (300, 240), (80, 60), (1, 1)] {
+            let mut buf = vec![0u32; win.0 * win.1];
+            let mut p = Palette::commands(list.entries.clone(), Some("nord"));
+            draw(&mut r, &mut buf, win, &p, &list, &cfg, &[]);
+            p.key(crate::palette::Key::Enter);
+            for _ in 0..90 {
+                p.key(crate::palette::Key::Down);
+            }
+            draw(
+                &mut r,
+                &mut buf,
+                win,
+                &p,
+                &list,
+                &cfg,
+                &["a note".to_string()],
+            );
+            if win == (w, h) {
+                let l = layout(win, r.cell_size(), 1, MAX_ROWS).unwrap();
+                let inside = buf[(l.y + l.h / 2) * win.0 + l.x + l.w / 2];
+                assert_ne!(inside, 0, "the box was not painted");
+                assert_eq!(buf[0], 0, "painted outside the box");
+            }
+        }
+    }
+
+    /// Lets a human look at the overlay without opening a window:
+    /// `cargo test -p platform-win dump_the_palette -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dump_the_palette() {
+        let mut r = renderer().expect("font");
+        let (list, _) = ThemeList::build();
+        let (w, h) = (1000usize, 620usize);
+        let mut buf = vec![0u32; w * h];
+        let mut p = Palette::commands(list.entries.clone(), Some("nord"));
+        p.key(crate::palette::Key::Enter);
+        let i = list
+            .entries
+            .iter()
+            .position(|e| e.name == "nord")
+            .unwrap_or(0);
+        let cfg = config_file::compose(&Partial::default(), list.layers[i].clone(), &|_| None);
+        r.set_colors(cfg.colors.foreground, cfg.colors.background);
+        r.set_palette(&cfg.colors.palette);
+        r.clear(&mut buf);
+        let notes = vec!["Note: theme= in foothy.ini wins at startup.".to_string()];
+        draw(&mut r, &mut buf, (w, h), &p, &list, &cfg, &notes);
+
+        let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+        for px in &buf {
+            out.extend_from_slice(&[(px >> 16) as u8, (px >> 8) as u8, *px as u8]);
+        }
+        let path = std::env::temp_dir().join("foothy-palette.ppm");
+        std::fs::write(&path, out).unwrap();
+        println!("wrote {}", path.display());
     }
 
     /// A theme must not reach the session through the swatch path either.
