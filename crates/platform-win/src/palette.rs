@@ -102,6 +102,9 @@ impl Palette {
         p
     }
 
+    // Entering the list goes through Commands, so only the tests construct
+    // this mode directly.
+    #[cfg_attr(not(test), expect(dead_code))]
     pub fn themes(themes: Vec<ThemeEntry>, current: Option<&str>) -> Self {
         let mut p = Self::new(Mode::Themes, themes, current);
         p.refilter();
