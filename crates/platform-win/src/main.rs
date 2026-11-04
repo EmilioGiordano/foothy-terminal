@@ -4,6 +4,7 @@
 
 mod chrome;
 mod clipboard;
+mod config_file;
 mod panes;
 
 use std::collections::HashMap;
@@ -26,12 +27,6 @@ use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{CursorIcon, Window, WindowId};
 
 const FONT_PATH: &str = r"C:\Windows\Fonts\CascadiaMono.ttf";
-const FONT_PX: f32 = 16.0;
-// foot's own default is pad=0x0 (doc/foot.ini.5.scd).
-const PAD: usize = 0;
-const BG: u32 = 0x0016_2a33;
-const FG: u32 = 0x00cf_ecf7;
-const ALPHA: u8 = 235;
 const LINES_PER_NOTCH: i32 = 3;
 /// How long to keep reading a pane after its child exits, so the last output
 /// still arrives: ConPTY leaves bytes in flight past the exit.
@@ -54,20 +49,6 @@ const CLOSE_HOVER: u32 = 0x00b3_4a4a;
 const CLOSE_GLYPHS: [char; 4] = ['×', '╳', '⨯', 'x'];
 /// Same reason as the close glyph: a font without it would draw tofu.
 const FOCUS_GLYPHS: [char; 3] = ['▍', '▌', '|'];
-
-fn env_hex(key: &str, fallback: u32) -> u32 {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| u32::from_str_radix(v.trim_start_matches('#'), 16).ok())
-        .unwrap_or(fallback)
-}
-
-fn env_or<T: std::str::FromStr>(key: &str, fallback: T) -> T {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(fallback)
-}
 
 fn preview(text: &str) -> String {
     let first = text.lines().next().unwrap_or("").trim();
@@ -259,15 +240,29 @@ struct App {
     blink: Option<Duration>,
     blink_on: bool,
     blink_since: Instant,
+    cfg: config::Config,
 }
 
 impl App {
     fn new(proxy: EventLoopProxy<()>) -> anyhow::Result<Self> {
-        let font_path = std::env::var("FOOTWIN_FONT").unwrap_or_else(|_| FONT_PATH.into());
-        let font = std::fs::read(&font_path)?;
-        let mut renderer = Renderer::new(&font, env_or("FOOTWIN_FONT_PX", FONT_PX))?;
-        renderer.set_padding(env_or("FOOTWIN_PAD", PAD));
-        renderer.set_colors(env_hex("FOOTWIN_FG", FG), env_hex("FOOTWIN_BG", BG));
+        let loaded = config_file::load_from_disk();
+        for problem in &loaded.problems {
+            eprintln!("foothy: {problem}");
+        }
+        let cfg = loaded.config;
+
+        // A bad font= must not stop the terminal from opening.
+        let font = match cfg.font.as_deref() {
+            Some(path) => std::fs::read(path).or_else(|e| {
+                eprintln!("foothy: font '{path}': {e}");
+                std::fs::read(FONT_PATH)
+            })?,
+            None => std::fs::read(FONT_PATH)?,
+        };
+        let mut renderer = Renderer::new(&font, cfg.font_size)?;
+        renderer.set_padding(cfg.pad as usize);
+        renderer.set_colors(cfg.colors.foreground, cfg.colors.background);
+        renderer.set_palette(&cfg.colors.palette);
         let header_h = renderer.header_height();
         let cell_w = renderer.cell_size().0;
         let pick = |candidates: &[char], fallback: char| {
@@ -308,6 +303,7 @@ impl App {
             blink: None,
             blink_on: true,
             blink_since: Instant::now(),
+            cfg,
         })
     }
 
@@ -551,7 +547,7 @@ impl App {
             .focused()
             .is_some_and(|p| p.term.bracketed_paste());
 
-        if env_or("FOOTWIN_PASTE_WARN", 1) != 0
+        if self.cfg.paste_warning
             && let Some(message) = warning_for(paste::assess(&text, bracketed), &text)
             && !chrome::confirm(self.hwnd as _, "Confirmar pegado", &message)
         {
@@ -805,19 +801,15 @@ impl ApplicationHandler for App {
             self.hwnd = w.hwnd.get();
             let hwnd = self.hwnd as _;
             chrome::set_dark_titlebar(hwnd, true);
-            chrome::set_opacity(hwnd, env_or("FOOTWIN_ALPHA", ALPHA));
+            chrome::set_opacity(hwnd, self.cfg.alpha);
         }
 
-        // Unset means the system decides, and it already honours the
-        // accessibility preference. FOOTWIN_BLINK=0 turns it off; any other
-        // number is the period in milliseconds.
-        self.blink = match std::env::var("FOOTWIN_BLINK")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-        {
-            None => chrome::caret_blink(),
-            Some(0) => None,
-            Some(ms) => Some(Duration::from_millis(ms)),
+        // Blink::System means the system decides, and it already honours the
+        // accessibility preference.
+        self.blink = match self.cfg.blink {
+            config::Blink::System => chrome::caret_blink(),
+            config::Blink::Off => None,
+            config::Blink::Ms(ms) => Some(Duration::from_millis(ms)),
         };
         if self.blink.is_none() {
             self.blink_on = true;
@@ -917,7 +909,7 @@ impl ApplicationHandler for App {
                     };
                     if let Some(steps) = zoom {
                         if steps == 0 {
-                            let base = env_or("FOOTWIN_FONT_PX", FONT_PX);
+                            let base = self.cfg.font_size;
                             self.apply_font_size(base);
                         } else {
                             self.zoom(steps);
