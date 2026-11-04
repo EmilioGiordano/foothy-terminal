@@ -283,6 +283,20 @@ mod tests {
     }
 
     #[test]
+    fn a_theme_with_only_light_colours_still_flips_the_variant() {
+        let read = only(USER_FILE, "theme=mine\n");
+        let mine = only("mine", "[colors-light]\nbackground=eeeeee\n");
+        let c = load(read, mine, none).config;
+        assert_eq!(c.variant, Variant::Light);
+        assert_eq!(c.colors.background, 0x00ee_eeee);
+    }
+
+    #[test]
+    fn footwin_alpha_stays_a_byte_not_a_fraction() {
+        assert_eq!(load(none, none, only("FOOTWIN_ALPHA", "1")).config.alpha, 1);
+    }
+
+    #[test]
     fn a_malformed_line_is_reported_and_the_rest_applies() {
         let read = only(USER_FILE, "font-size=18\nthis is not a setting\npad=2\n");
         let out = load(read, none, none);
