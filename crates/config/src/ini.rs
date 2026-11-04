@@ -14,12 +14,9 @@ enum Section {
     Main,
     Dark,
     Light,
-    /// A section this terminal has no feature for; its keys are dropped.
     Other,
 }
 
-/// Parse one file. Returns what it understood plus a note for every line it
-/// could not use.
 pub fn parse(text: &str) -> (Partial, Vec<Problem>) {
     let mut out = Partial::default();
     let mut problems = Vec::new();
@@ -44,10 +41,16 @@ pub fn parse(text: &str) -> (Partial, Vec<Problem>) {
                         _ => Section::Other,
                     }
                 }
-                None => problems.push(Problem {
-                    line,
-                    message: "section is missing its closing ']'".into(),
-                }),
+                None => {
+                    // A rejected header must not leave the previous section in
+                    // force, or its keys land in the wrong one
+                    // (upstream/foot/config.c:3257-3269).
+                    section = Section::Other;
+                    problems.push(Problem {
+                        line,
+                        message: "section is missing its closing ']'".into(),
+                    });
+                }
             }
             continue;
         }
@@ -100,11 +103,13 @@ fn strip_comment(raw: &str) -> &str {
 }
 
 fn color(value: &str) -> Result<u32, String> {
-    let v = value.strip_prefix('#').unwrap_or(value);
-    if v.len() != 6 || !v.bytes().all(|b| b.is_ascii_hexdigit()) {
+    // Six hex digits and nothing else, as foot (upstream/foot/config.c:702). A
+    // leading '#' cannot be accepted: with a space before it, the comment rule
+    // has already eaten the value.
+    if value.len() != 6 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!("'{value}' is not a six-digit RGB colour"));
     }
-    u32::from_str_radix(v, 16).map_err(|_| format!("'{value}' is not a six-digit RGB colour"))
+    u32::from_str_radix(value, 16).map_err(|_| format!("'{value}' is not a six-digit RGB colour"))
 }
 
 fn two_colors(value: &str) -> Result<(u32, u32), String> {
