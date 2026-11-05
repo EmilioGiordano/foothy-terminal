@@ -945,6 +945,7 @@ mod tests {
     fn the_chip_name_carries_this_process_id() {
         assert_eq!(chip_file(), format!("chip-{}.conf", std::process::id()));
         assert!(chip_path().ends_with(chip_file()));
+        assert!(chip_path().starts_with(std::env::temp_dir()));
     }
 
     #[test]
