@@ -159,7 +159,7 @@ fn look(cfg: &Config) -> Look {
 fn footer(mode: Mode) -> &'static str {
     match (mode, mode.parent().is_some()) {
         (Mode::Themes, true) => "Enter: keep   Esc: back   Up/Down: preview",
-        (Mode::Styles, true) => "Enter: keep   Esc: back   Applies to new panes",
+        (Mode::Styles, true) => "Enter: keep   Esc: back   Applies at the next prompt",
         (_, true) => "Enter: choose   Esc: back   Type to filter",
         (_, false) => "Enter: run   Esc: close   Type to filter",
     }
@@ -395,7 +395,7 @@ mod tests {
                 assert!(hint.contains("Esc: close"), "{mode:?}: {hint}");
             }
         }
-        assert!(footer(Mode::Styles).contains("new panes"));
+        assert!(footer(Mode::Styles).contains("next prompt"));
     }
 
     #[test]
