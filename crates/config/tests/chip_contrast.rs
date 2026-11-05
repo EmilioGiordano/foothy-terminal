@@ -135,29 +135,35 @@ fn the_chip_contrast_floors_over_every_bundled_theme() {
 
     for style in [ChipStyle::Surface, ChipStyle::Inverse] {
         let mut pill = Floor::new();
-        let mut inks = Floor::new();
+        let mut inks = [Floor::new(), Floor::new(), Floor::new(), Floor::new()];
         let mut chevron = Floor::new();
+        let mut labels = ["", "", "", ""];
         for p in &pairs {
             let chip = chip_colors(&p.colors, style);
             let (fill, painted_inks) = painted(&chip, &p.colors);
             pill.see(contrast(fill, p.colors.background), &p.name);
-            for (what, color) in painted_inks {
-                inks.see(contrast(color, fill), &format!("{} {what}", p.name));
+            for (i, (what, color)) in painted_inks.into_iter().enumerate() {
+                labels[i] = what;
+                inks[i].see(contrast(color, fill), &p.name);
             }
             chevron.see(contrast(chip.chevron, p.colors.background), &p.name);
         }
         println!("\n{style:?}");
         println!(
-            "  pill on the background: {:.2}:1 ({})",
-            pill.ratio, pill.who
+            "  {:<26} {:.2}:1 ({})",
+            "pill on the bg:", pill.ratio, pill.who
         );
+        for (label, floor) in labels.iter().zip(&inks) {
+            println!(
+                "  {:<26} {:.2}:1 ({})",
+                format!("{label} on the pill:"),
+                floor.ratio,
+                floor.who
+            );
+        }
         println!(
-            "  text on the pill:       {:.2}:1 ({})",
-            inks.ratio, inks.who
-        );
-        println!(
-            "  chevron on the bg:      {:.2}:1 ({})",
-            chevron.ratio, chevron.who
+            "  {:<26} {:.2}:1 ({})",
+            "chevron on the bg:", chevron.ratio, chevron.who
         );
     }
     println!();
