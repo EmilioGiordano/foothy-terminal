@@ -7,8 +7,7 @@ pub enum Mode {
 }
 
 impl Mode {
-    /// Esc steps back to the parent; only the root closes the palette. No
-    /// wildcard arm: a new mode cannot compile without declaring its parent.
+    /// No wildcard arm: a new mode cannot compile without declaring its parent.
     pub fn parent(self) -> Option<Mode> {
         match self {
             Mode::Commands => None,
@@ -32,8 +31,8 @@ pub enum Action {
 }
 
 impl Action {
-    /// The only place a row is tied to the list it opens. No wildcard arm:
-    /// `_ => None` would make a new opener silently run as a plain action.
+    /// No wildcard arm: `_ => None` would make a new opener silently run as a
+    /// plain action.
     fn opens(self) -> Option<Mode> {
         match self {
             Action::SelectTheme => Some(Mode::Themes),
@@ -53,12 +52,10 @@ impl Action {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Outcome {
     Stay,
-    /// A theme to paint, not to keep: only Enter commits.
     Preview(usize),
     Commit(usize),
     Run(Action),
-    /// Drop the preview but keep the palette open: Esc steps out of a sub-list
-    /// instead of closing.
+    /// Keeps the palette open, unlike `Cancel`.
     Restore,
     Cancel,
 }
@@ -81,7 +78,6 @@ pub enum Half {
     Bottom,
 }
 
-/// Half-cell resolution: a filled rectangle, not a glyph.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Marker {
     pub row: usize,
@@ -99,12 +95,10 @@ pub struct Row<'a> {
     pub label: &'a str,
     pub tag: &'a str,
     pub selected: bool,
-    /// Index into the unfiltered theme list, for the caller's swatch colours.
+    /// Index into the unfiltered theme list.
     pub theme: Option<usize>,
 }
 
-/// Only actions main.rs already implements, each tagged with the shortcut it
-/// already answers to.
 const COMMANDS: [(Action, &str, &str); 10] = [
     (Action::SelectTheme, "Select theme...", ""),
     (Action::SplitRight, "Split right", "Ctrl+Shift+Right"),
@@ -130,8 +124,6 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// The only constructor: the theme list is reached through `Select
-    /// theme...`, so no caller can skip the mode switch.
     pub fn commands(themes: Vec<ThemeEntry>, current: Option<&str>) -> Self {
         let mut p = Self {
             mode: Mode::Commands,
@@ -158,8 +150,8 @@ impl Palette {
         &self.filter
     }
 
-    /// The snapshot taken at open time: a commit the caller kept for the
-    /// session must reach it, or re-entering the list previews the old theme.
+    /// Without this, re-entering the list previews the theme the caller
+    /// abandoned.
     pub fn set_current(&mut self, name: &str) {
         self.current = Some(name.to_string());
     }
@@ -192,7 +184,6 @@ impl Palette {
         }
     }
 
-    /// The wheel clamps where the arrows wrap: spatial input does not wrap.
     pub fn wheel(&mut self, down: bool) -> Outcome {
         let len = self.matches.len();
         if len == 0 {
@@ -331,7 +322,6 @@ impl Palette {
 
     fn open(&mut self, sub: Mode) -> Outcome {
         self.set_mode(sub);
-        // A filter typed over the commands must not narrow the sub-list.
         self.filter.clear();
         self.refilter();
         // `select_current` reads `self.themes`, so it belongs to one mode only.
@@ -342,9 +332,6 @@ impl Palette {
         self.moved()
     }
 
-    /// The mirror of opening the list: the filter the sub-list collected is not
-    /// the one the parent had, so it cannot survive the step back. The row to
-    /// land on is the one that opens the list being left, found and not assumed.
     fn back(&mut self, parent: Mode) -> Outcome {
         let from = self.mode;
         self.set_mode(parent);
@@ -358,8 +345,8 @@ impl Palette {
         Outcome::Restore
     }
 
-    /// The one place the mode changes after construction, so whatever the
-    /// caller must drop on a mode change is flagged for every sub-list.
+    /// The one place the mode changes after construction, so every sub-list
+    /// is flagged.
     fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
         self.mode_changed = true;
@@ -399,8 +386,6 @@ mod tests {
             .collect()
     }
 
-    /// The theme list through the path a user takes, so every test below
-    /// exercises the mode switch.
     fn themes(entries: Vec<ThemeEntry>, current: Option<&str>) -> Palette {
         let mut p = Palette::commands(entries, current);
         p.key(Key::Enter);
@@ -649,8 +634,6 @@ mod tests {
         assert_eq!(p.key(Key::Esc), Outcome::Cancel);
     }
 
-    /// The rule rather than the one case: driven off `Action::opens`, so a
-    /// sub-list is covered the moment it is declared.
     #[test]
     fn esc_steps_back_from_every_sub_list_and_only_the_root_cancels() {
         let openers: Vec<(usize, Mode)> = COMMANDS
@@ -684,8 +667,6 @@ mod tests {
         assert_eq!(reached.iter().filter(|m| m.parent().is_none()).count(), 1);
     }
 
-    /// Driven off `Action::opens`, so a sub-list added later is covered the
-    /// moment it is declared.
     #[test]
     fn only_a_mode_change_is_flagged_to_the_caller() {
         let mut p = Palette::commands(many(40), None);
