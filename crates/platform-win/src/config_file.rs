@@ -268,27 +268,28 @@ pub fn compose(files: &Partial, theme: Partial, env: &impl Fn(&str) -> Option<St
     resolved.resolve(Variant::Dark)
 }
 
-/// Writes the app's own file. Temp plus rename so a crash mid-write cannot
-/// leave a half-parsed state.ini behind. The temp carries the process id: two
-/// windows committing at once would otherwise share one file and lose a pick.
-///
-/// Only `field` is taken from `state`; the rest of the file is re-read first.
-/// A second window's pick landed after this one loaded, and rewriting from a
-/// load-time snapshot would drop it.
+/// Temp plus rename so a crash mid-write cannot leave a half-parsed file
+/// behind. The temp carries the process id: two windows writing at once would
+/// otherwise share one file and lose a pick.
+fn write_replacing(dir: &std::path::Path, name: &str, text: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!("{name}.{}.tmp", std::process::id()));
+    let out = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, dir.join(name)));
+    if out.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    out
+}
+
+/// Only `field` is taken from `state`; the rest of the file is re-read first,
+/// or a pick another window made after this one loaded would be dropped.
 pub fn save_state_in(dir: &std::path::Path, state: &State, field: Field) -> std::io::Result<()> {
     let mut merged = read_state_in(dir)?;
     match field {
         Field::Theme => merged.theme = state.theme.clone(),
         Field::PromptStyle => merged.prompt_style = state.prompt_style,
     }
-    std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!("{STATE_FILE}.{}.tmp", std::process::id()));
-    let out = std::fs::write(&tmp, merged.body())
-        .and_then(|()| std::fs::rename(&tmp, dir.join(STATE_FILE)));
-    if out.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    out
+    write_replacing(dir, STATE_FILE, &merged.body())
 }
 
 /// Absent is empty; any other read error fails the save rather than writing a
@@ -310,16 +311,8 @@ pub fn chip_path() -> Option<PathBuf> {
     dir().map(|d| d.join(CHIP_FILE))
 }
 
-/// The chip values a running prompt re-reads. Derived from state.ini, so a
-/// failed write costs the pane its new look, never a pick.
 pub fn save_chip_in(dir: &std::path::Path, text: &str) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!("{CHIP_FILE}.{}.tmp", std::process::id()));
-    let out = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, dir.join(CHIP_FILE)));
-    if out.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    out
+    write_replacing(dir, CHIP_FILE, text)
 }
 
 pub fn save_chip(text: &str) -> std::io::Result<()> {
@@ -779,18 +772,8 @@ mod tests {
     fn a_failed_save_leaves_no_temp_file_behind() {
         let dir = std::env::temp_dir().join("foothy-test-save-fails");
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join(STATE_FILE)).unwrap();
-        assert!(
-            save_state_in(
-                &dir,
-                &State {
-                    theme: Some("nord".to_string()),
-                    prompt_style: None,
-                },
-                Field::Theme,
-            )
-            .is_err()
-        );
+        std::fs::create_dir_all(dir.join(CHIP_FILE)).unwrap();
+        assert!(save_chip_in(&dir, "chevron=a\n").is_err());
         let left: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
@@ -799,6 +782,25 @@ mod tests {
             .collect();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(left.is_empty(), "{left:?}");
+    }
+
+    #[test]
+    fn an_unreadable_state_file_is_not_overwritten() {
+        let dir = std::env::temp_dir().join("foothy-test-state-unreadable");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(STATE_FILE)).unwrap();
+        let out = save_state_in(
+            &dir,
+            &State {
+                theme: Some("nord".to_string()),
+                prompt_style: None,
+            },
+            Field::Theme,
+        );
+        let still_a_dir = dir.join(STATE_FILE).is_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out.is_err());
+        assert!(still_a_dir);
     }
 
     #[test]
