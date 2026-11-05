@@ -15,7 +15,6 @@ pub const ALPHA: u8 = 235;
 
 pub const USER_FILE: &str = "foothy.ini";
 pub const STATE_FILE: &str = "state.ini";
-pub const CHIP_FILE: &str = "chip.conf";
 
 pub struct Loaded {
     pub config: Config,
@@ -307,33 +306,24 @@ fn read_state_in(dir: &std::path::Path) -> std::io::Result<State> {
     })
 }
 
-pub fn chip_path() -> Option<PathBuf> {
-    dir().map(|d| d.join(CHIP_FILE))
+pub fn chip_file() -> String {
+    format!("chip-{}.conf", std::process::id())
+}
+
+fn chip_dir() -> PathBuf {
+    std::env::temp_dir().join("foothy")
+}
+
+pub fn chip_path() -> PathBuf {
+    chip_dir().join(chip_file())
 }
 
 pub fn save_chip_in(dir: &std::path::Path, text: &str) -> std::io::Result<()> {
-    write_replacing(dir, CHIP_FILE, text)
+    write_replacing(dir, &chip_file(), text)
 }
 
 pub fn save_chip(text: &str) -> std::io::Result<()> {
-    save_chip_in(&appdata()?, text)
-}
-
-/// One file is shared by every window, so startup must not overwrite it: this
-/// window's `FOOTWIN_*` colours would land in the other windows' prompts.
-pub fn save_chip_if_absent_in(dir: &std::path::Path, text: &str) -> std::io::Result<()> {
-    if dir.join(CHIP_FILE).exists() {
-        return Ok(());
-    }
-    save_chip_in(dir, text)
-}
-
-pub fn save_chip_if_absent(text: &str) -> std::io::Result<()> {
-    save_chip_if_absent_in(&appdata()?, text)
-}
-
-fn appdata() -> std::io::Result<PathBuf> {
-    dir().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "APPDATA is not set"))
+    save_chip_in(&chip_dir(), text)
 }
 
 pub fn save_state(state: &State, field: Field) -> std::io::Result<()> {
@@ -787,7 +777,7 @@ mod tests {
     fn a_failed_save_leaves_no_temp_file_behind() {
         let dir = std::env::temp_dir().join("foothy-test-save-fails");
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join(CHIP_FILE)).unwrap();
+        std::fs::create_dir_all(dir.join(chip_file())).unwrap();
         assert!(save_chip_in(&dir, "chevron=a\n").is_err());
         let left: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
@@ -915,7 +905,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         save_chip_in(&dir, "chevron=a\n").unwrap();
         save_chip_in(&dir, "chevron=b\n").unwrap();
-        let text = std::fs::read_to_string(dir.join(CHIP_FILE)).unwrap();
+        let text = std::fs::read_to_string(dir.join(chip_file())).unwrap();
         let left: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
@@ -928,14 +918,9 @@ mod tests {
     }
 
     #[test]
-    fn the_absent_only_write_leaves_a_chip_file_another_window_left() {
-        let dir = std::env::temp_dir().join("foothy-test-chip-absent");
-        let _ = std::fs::remove_dir_all(&dir);
-        save_chip_if_absent_in(&dir, "chevron=a\n").unwrap();
-        save_chip_if_absent_in(&dir, "chevron=b\n").unwrap();
-        let text = std::fs::read_to_string(dir.join(CHIP_FILE)).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(text, "chevron=a\n");
+    fn the_chip_name_carries_this_process_id() {
+        assert_eq!(chip_file(), format!("chip-{}.conf", std::process::id()));
+        assert!(chip_path().ends_with(chip_file()));
     }
 
     #[test]

@@ -56,11 +56,10 @@ fn prompt_command(cfg: &config::Config, renderer: &Renderer) -> Option<String> {
     }
     let glyphs = prompt::Glyphs::pick(|c| renderer.has_glyph(c));
     let colors = config::chip_colors(&cfg.colors, cfg.prompt_style);
-    let path = config_file::chip_path();
     Some(prompt::encoded_command(&prompt::script(
         &glyphs,
         &colors,
-        path.as_deref(),
+        Some(&config_file::chip_path()),
     )))
 }
 
@@ -71,6 +70,13 @@ fn chip_values(cfg: &config::Config, renderer: &Renderer) -> Option<String> {
     let glyphs = prompt::Glyphs::pick(|c| renderer.has_glyph(c));
     let colors = config::chip_colors(&cfg.colors, cfg.prompt_style);
     Some(prompt::values_file(&glyphs, &colors))
+}
+
+fn chip_failure(e: &std::io::Error) -> String {
+    format!(
+        "Could not write {}: {e}. The prompt chip keeps the colours it has.",
+        config_file::chip_path().display()
+    )
 }
 
 fn preview(text: &str) -> String {
@@ -338,9 +344,9 @@ impl App {
 
         let mut panes = Panes::new(header_h, cell_w);
         panes.set_prompt(prompt_command(&cfg, &renderer));
-        let chip = chip_values(&cfg, &renderer).map(|t| config_file::save_chip_if_absent(&t));
-        if let Some(Err(e)) = chip {
-            eprintln!("foothy: could not write {}: {e}", config_file::CHIP_FILE);
+        if let Some(e) = chip_values(&cfg, &renderer).and_then(|t| config_file::save_chip(&t).err())
+        {
+            eprintln!("foothy: {}", chip_failure(&e));
         }
         Ok(Self {
             proxy,
@@ -879,12 +885,10 @@ impl App {
         match out {
             Ok(()) => false,
             Err(e) => {
-                eprintln!("foothy: could not write {}: {e}", config_file::CHIP_FILE);
+                let note = chip_failure(&e);
+                eprintln!("foothy: {note}");
                 if self.status.is_none() {
-                    self.status = Some(format!(
-                        "Could not save {}: the chip keeps its current colours.",
-                        config_file::CHIP_FILE
-                    ));
+                    self.status = Some(note);
                 }
                 true
             }
