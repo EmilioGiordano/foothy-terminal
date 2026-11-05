@@ -66,7 +66,7 @@ mod tests {
     #[test]
     fn multiline_without_bracketed_would_execute() {
         assert_eq!(
-            assess("uno\ndos\ntres", false),
+            assess("one\ntwo\nthree", false),
             Risk::WouldExecute { lines: 3 }
         );
     }
@@ -74,7 +74,7 @@ mod tests {
     #[test]
     fn bracketed_paste_makes_multiline_safe() {
         // The program promised to treat it as data, so nagging would be noise.
-        assert_eq!(assess("uno\ndos\ntres", true), Risk::Safe);
+        assert_eq!(assess("one\ntwo\nthree", true), Risk::Safe);
     }
 
     #[test]
@@ -88,9 +88,9 @@ mod tests {
 
     #[test]
     fn crlf_counts_as_one_break() {
-        assert_eq!(line_count("uno\r\ndos"), 2);
-        assert_eq!(line_count("uno\rdos"), 2);
-        assert_eq!(line_count("uno\ndos"), 2);
+        assert_eq!(line_count("one\r\ntwo"), 2);
+        assert_eq!(line_count("one\rtwo"), 2);
+        assert_eq!(line_count("one\ntwo"), 2);
     }
 
     #[test]
@@ -113,8 +113,8 @@ mod tests {
     #[test]
     fn normalize_maps_every_ending_to_cr() {
         assert_eq!(
-            normalize("uno\r\ndos\ntres\rcuatro"),
-            "uno\rdos\rtres\rcuatro"
+            normalize("one\r\ntwo\nthree\rfour"),
+            "one\rtwo\rthree\rfour"
         );
     }
 
