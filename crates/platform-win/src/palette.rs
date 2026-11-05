@@ -96,31 +96,19 @@ pub struct Palette {
 }
 
 impl Palette {
+    /// The only constructor: the theme list is reached through `Select
+    /// theme...`, so no caller can skip the mode switch.
     pub fn commands(themes: Vec<ThemeEntry>, current: Option<&str>) -> Self {
-        let mut p = Self::new(Mode::Commands, themes, current);
-        p.refilter();
-        p
-    }
-
-    // Entering the list goes through Commands, so only the tests construct
-    // this mode directly.
-    #[cfg_attr(not(test), expect(dead_code))]
-    pub fn themes(themes: Vec<ThemeEntry>, current: Option<&str>) -> Self {
-        let mut p = Self::new(Mode::Themes, themes, current);
-        p.refilter();
-        p.select_current();
-        p
-    }
-
-    fn new(mode: Mode, themes: Vec<ThemeEntry>, current: Option<&str>) -> Self {
-        Self {
-            mode,
+        let mut p = Self {
+            mode: Mode::Commands,
             filter: String::new(),
             sel: 0,
             themes,
             current: current.map(str::to_string),
             matches: Vec::new(),
-        }
+        };
+        p.refilter();
+        p
     }
 
     pub fn mode(&self) -> Mode {
@@ -324,6 +312,15 @@ mod tests {
             .collect()
     }
 
+    /// The theme list through the path a user takes, so every test below
+    /// exercises the mode switch.
+    fn themes(entries: Vec<ThemeEntry>, current: Option<&str>) -> Palette {
+        let mut p = Palette::commands(entries, current);
+        p.key(Key::Enter);
+        assert_eq!(p.mode(), Mode::Themes);
+        p
+    }
+
     fn many(n: usize) -> Vec<ThemeEntry> {
         let names: Vec<String> = (0..n).map(|i| format!("theme-{i:02}")).collect();
         entries(&names.iter().map(String::as_str).collect::<Vec<_>>())
@@ -381,7 +378,7 @@ mod tests {
 
     #[test]
     fn typing_resets_the_selection_to_the_first_row() {
-        let mut p = Palette::themes(many(40), None);
+        let mut p = themes(many(40), None);
         p.key(Key::End);
         type_str(&mut p, "theme-1");
         assert_eq!(p.offset(8), 0);
@@ -392,7 +389,7 @@ mod tests {
     fn the_marker_and_the_highlight_never_disagree() {
         let rows = 8;
         let len = 40;
-        let mut p = Palette::themes(many(len), None);
+        let mut p = themes(many(len), None);
         let mut last = p.marker(rows).unwrap();
         assert_eq!(
             last,
@@ -425,7 +422,7 @@ mod tests {
     fn the_selection_stays_centred_except_at_the_ends() {
         let rows = 7;
         let len = 30;
-        let mut p = Palette::themes(many(len), None);
+        let mut p = themes(many(len), None);
         for sel in 0..len {
             let off = p.offset(rows);
             let pos = sel - off;
@@ -442,13 +439,13 @@ mod tests {
 
     #[test]
     fn a_short_list_has_no_marker() {
-        let p = Palette::themes(many(4), None);
+        let p = themes(many(4), None);
         assert!(p.marker(8).is_none());
     }
 
     #[test]
     fn the_arrows_wrap() {
-        let mut p = Palette::themes(many(3), None);
+        let mut p = themes(many(3), None);
         assert_eq!(p.key(Key::Up), Outcome::Preview(2));
         assert_eq!(p.key(Key::Down), Outcome::Preview(0));
         p.key(Key::End);
@@ -457,7 +454,7 @@ mod tests {
 
     #[test]
     fn the_wheel_clamps() {
-        let mut p = Palette::themes(many(3), None);
+        let mut p = themes(many(3), None);
         assert_eq!(p.wheel(false), Outcome::Preview(0));
         for _ in 0..5 {
             p.wheel(true);
@@ -467,7 +464,7 @@ mod tests {
 
     #[test]
     fn an_empty_result_set_has_no_selection_no_marker_and_enter_does_nothing() {
-        let mut p = Palette::themes(many(40), None);
+        let mut p = themes(many(40), None);
         type_str(&mut p, "nothing-matches-this");
         assert!(p.visible(8).is_empty());
         assert!(p.marker(8).is_none());
@@ -499,7 +496,7 @@ mod tests {
 
     #[test]
     fn opening_the_theme_list_selects_the_current_theme() {
-        let p = Palette::themes(many(40), Some("theme-25"));
+        let p = themes(many(40), Some("theme-25"));
         let view = p.visible(8);
         let sel = view.iter().find(|r| r.selected).unwrap();
         assert_eq!(sel.label, "theme-25");
@@ -508,13 +505,13 @@ mod tests {
 
     #[test]
     fn an_unknown_current_theme_falls_back_to_the_first_row() {
-        let p = Palette::themes(many(5), Some("not-bundled"));
+        let p = themes(many(5), Some("not-bundled"));
         assert!(p.visible(8)[0].selected);
     }
 
     #[test]
     fn preview_and_commit_carry_the_unfiltered_theme_index() {
-        let mut p = Palette::themes(many(40), None);
+        let mut p = themes(many(40), None);
         type_str(&mut p, "theme-3");
         assert_eq!(p.key(Key::Down), Outcome::Preview(31));
         assert_eq!(p.key(Key::Enter), Outcome::Commit(31));
@@ -522,7 +519,7 @@ mod tests {
 
     #[test]
     fn moving_in_theme_mode_previews_but_never_commits() {
-        let mut p = Palette::themes(many(5), None);
+        let mut p = themes(many(5), None);
         for _ in 0..5 {
             assert!(matches!(p.key(Key::Down), Outcome::Preview(_)));
         }
@@ -533,14 +530,14 @@ mod tests {
     fn esc_cancels_in_both_modes() {
         let mut p = Palette::commands(many(3), None);
         assert_eq!(p.key(Key::Esc), Outcome::Cancel);
-        let mut p = Palette::themes(many(3), None);
+        let mut p = themes(many(3), None);
         p.key(Key::Down);
         assert_eq!(p.key(Key::Esc), Outcome::Cancel);
     }
 
     #[test]
     fn a_theme_row_is_tagged_with_its_variant() {
-        let p = Palette::themes(entries(&["a", "b"]), None);
+        let p = themes(entries(&["a", "b"]), None);
         let view = p.visible(8);
         assert_eq!(view[0].tag, "dark");
         assert_eq!(view[1].tag, "light");
