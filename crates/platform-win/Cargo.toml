@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 vt-core = { path = "../vt-core" }
 render = { path = "../render" }
+config = { path = "../config" }
 input = { path = "../input" }
 layout = { path = "../layout" }
 portable-pty.workspace = true
