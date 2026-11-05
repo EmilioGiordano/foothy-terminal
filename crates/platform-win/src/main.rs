@@ -633,14 +633,28 @@ impl App {
         self.cfg = cfg;
     }
 
-    fn close_palette(&mut self, restore: bool) {
-        let Some(open) = self.open.take() else {
+    /// Clearing `shown` is part of it: left set, re-entering the theme list on
+    /// the same index would be taken for a repeat and skip the repaint.
+    fn restore_look(&mut self) {
+        let Some(open) = self.open.as_mut() else {
             return;
         };
-        if restore && open.shown.is_some() {
-            self.apply_look(&open.saved);
-            self.cfg = open.saved;
+        if open.shown.take().is_none() {
+            return;
         }
+        let saved = open.saved.clone();
+        self.apply_look(&saved);
+        self.cfg = saved;
+    }
+
+    fn close_palette(&mut self, restore: bool) {
+        if self.open.is_none() {
+            return;
+        }
+        if restore {
+            self.restore_look();
+        }
+        self.open = None;
         self.redraw_soon();
     }
 
@@ -713,6 +727,10 @@ impl App {
                 // Closed first: paste opens a modal, and Close may exit.
                 self.close_palette(true);
                 self.run_action(action, event_loop);
+            }
+            palette::Outcome::Restore => {
+                self.restore_look();
+                self.redraw_soon();
             }
             palette::Outcome::Cancel => self.close_palette(true),
         }

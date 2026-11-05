@@ -27,6 +27,9 @@ pub enum Outcome {
     Preview(usize),
     Commit(usize),
     Run(Action),
+    /// Drop the preview but keep the palette open: Esc steps out of the theme
+    /// list instead of closing.
+    Restore,
     Cancel,
 }
 
@@ -121,7 +124,10 @@ impl Palette {
 
     pub fn key(&mut self, key: Key) -> Outcome {
         match key {
-            Key::Esc => Outcome::Cancel,
+            Key::Esc => match self.mode {
+                Mode::Themes => self.back(),
+                Mode::Commands => Outcome::Cancel,
+            },
             Key::Enter => self.enter(),
             Key::Up => self.step(-1),
             Key::Down => self.step(1),
@@ -283,6 +289,20 @@ impl Palette {
                 other => Outcome::Run(other),
             },
         }
+    }
+
+    /// The mirror of entering the list: the filter the theme list collected is
+    /// not the one the command list had, so it cannot survive the step back.
+    fn back(&mut self) -> Outcome {
+        self.mode = Mode::Commands;
+        self.filter.clear();
+        self.refilter();
+        self.sel = self
+            .matches
+            .iter()
+            .position(|&i| COMMANDS[i].0 == Action::SelectTheme)
+            .unwrap_or(0);
+        Outcome::Restore
     }
 
     fn moved(&self) -> Outcome {
@@ -527,12 +547,36 @@ mod tests {
     }
 
     #[test]
-    fn esc_cancels_in_both_modes() {
+    fn esc_cancels_the_command_list() {
         let mut p = Palette::commands(many(3), None);
         assert_eq!(p.key(Key::Esc), Outcome::Cancel);
+    }
+
+    #[test]
+    fn esc_in_the_theme_list_steps_back_to_the_commands() {
         let mut p = themes(many(3), None);
         p.key(Key::Down);
+        assert_eq!(p.key(Key::Esc), Outcome::Restore);
+        assert_eq!(p.mode(), Mode::Commands);
+        assert_eq!(p.filter(), "");
+        let view = p.visible(50);
+        assert_eq!(view.len(), COMMANDS.len());
+        assert_eq!(
+            view.iter().find(|r| r.selected).unwrap().label,
+            "Select theme..."
+        );
         assert_eq!(p.key(Key::Esc), Outcome::Cancel);
+    }
+
+    #[test]
+    fn a_filter_typed_in_the_theme_list_does_not_survive_the_step_back() {
+        let mut p = Palette::commands(many(40), None);
+        type_str(&mut p, "theme");
+        p.key(Key::Enter);
+        type_str(&mut p, "theme-1");
+        p.key(Key::Esc);
+        assert_eq!(p.filter(), "");
+        assert_eq!(labels(&p, 50).len(), COMMANDS.len());
     }
 
     #[test]
