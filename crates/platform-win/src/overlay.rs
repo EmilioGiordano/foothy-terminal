@@ -171,7 +171,7 @@ fn look(cfg: &Config) -> Look {
 fn footer(mode: Mode) -> &'static str {
     match mode {
         Mode::Commands => "Enter: run   Esc: close   Type to filter",
-        Mode::Themes => "Enter: keep   Esc: restore   Up/Down: preview",
+        Mode::Themes => "Enter: keep   Esc: back   Up/Down: preview",
     }
 }
 
