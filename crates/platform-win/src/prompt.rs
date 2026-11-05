@@ -224,15 +224,18 @@ function global:prompt {
   }
   try { $o = __footChipRead; if ($o) { $c = $o } } catch { }
 
-  $out = $c['path-on'] + $p + $c['path-off']
+  # A hand-edited chip file need not balance its own SGR, so the chip is
+  # bracketed with resets: a stray colour cannot outlive its own prompt.
+  $out = "${e}[0m" + $c['path-on'] + $p + $c['path-off']
   if ($b) { $out += $c['branch-on'] + $b + $c['branch-off'] }
+  $out += "${e}[0m"
 
   # The chip goes out as ordinary output and only the chevron is returned as the
   # prompt. A prompt PSReadLine believes is one line but that wraps after a
   # resize puts its cursor arithmetic out by a row, and it then reads part of
   # the chip back as typed input. Two cells cannot wrap.
   Write-Host $out
-  $c['chevron'] + ' '
+  $c['chevron'] + "${e}[0m" + ' '
 }
 "#;
 
