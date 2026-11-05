@@ -141,6 +141,42 @@ pub fn merge(base: Partial, over: Partial) -> Partial {
     }
 }
 
+/// The only way to read theme text: parsing and filtering in one call, so no
+/// caller can parse a theme and forget the filter.
+pub fn parse_theme(text: &str) -> (Partial, Vec<Problem>) {
+    let (partial, problems) = parse(text);
+    (from_theme(partial), problems)
+}
+
+/// A theme may contribute colours and the variant, nothing else. Named field
+/// by field on purpose: blanking the forbidden ones would leak the next
+/// setting added to `Settings`, such as a `paste-warning=no` turning off the
+/// multiline-paste guard without telling the user.
+fn from_theme(theme: Partial) -> Partial {
+    Partial {
+        settings: Settings {
+            initial_variant: theme.settings.initial_variant,
+            ..Default::default()
+        },
+        dark: theme.dark,
+        light: theme.light,
+    }
+}
+
+/// Colours belong to one variant only, so a layer that knows which one it is
+/// building for files them in the matching slot and leaves the other empty.
+pub fn into_variant(variant: Variant, colors: PartialColors, settings: Settings) -> Partial {
+    let (dark, light) = match variant {
+        Variant::Dark => (colors, PartialColors::default()),
+        Variant::Light => (PartialColors::default(), colors),
+    };
+    Partial {
+        settings,
+        dark,
+        light,
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Colors {
     pub foreground: u32,
