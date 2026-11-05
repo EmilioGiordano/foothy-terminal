@@ -186,7 +186,9 @@ cargo run -p vt-core --example prompt_probe -- p.ps1
 
 Precedence, lowest to highest: `defaults < theme < state.ini < foothy.ini < FOOTWIN_*`.
 
-**The app never writes `foothy.ini`.** Its own files are `state.ini`, which records the user's picks, and `chip.conf`, derived from them so the PowerShell prompt can re-read its colours without knowing how they were computed.
+**The app never writes `foothy.ini`.** Its own file is `state.ini`, shared by every window, which records the user's picks and survives a restart.
+
+The PowerShell prompt reads its colours from `%TEMP%\foothy\chip-<pid>.conf`: per-process scratch, not configuration. It is derived from the resolved config *and the window's own font* — the chip glyphs are chosen by what that font actually has — so it cannot be shared with a window that may be running another font. Each window writes it at startup and on every commit, and removes it when it exits.
 
 A theme file may contribute colours, the light/dark variant and `prompt-style`, nothing else — it is text people copy from the internet. `prompt-style` is on that list because the chip is part of a theme's look; every other key a theme file carries is dropped.
 
