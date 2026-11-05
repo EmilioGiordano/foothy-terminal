@@ -126,6 +126,7 @@ pub struct Palette {
     themes: Vec<ThemeEntry>,
     current: Option<String>,
     matches: Vec<usize>,
+    mode_changed: bool,
 }
 
 impl Palette {
@@ -139,6 +140,7 @@ impl Palette {
             themes,
             current: current.map(str::to_string),
             matches: Vec::new(),
+            mode_changed: false,
         };
         p.refilter();
         p
@@ -146,6 +148,10 @@ impl Palette {
 
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    pub fn take_mode_change(&mut self) -> bool {
+        std::mem::take(&mut self.mode_changed)
     }
 
     pub fn filter(&self) -> &str {
@@ -318,7 +324,7 @@ impl Palette {
     }
 
     fn open(&mut self, sub: Mode) -> Outcome {
-        self.mode = sub;
+        self.set_mode(sub);
         // A filter typed over the commands must not narrow the sub-list.
         self.filter.clear();
         self.refilter();
@@ -335,7 +341,7 @@ impl Palette {
     /// land on is the one that opens the list being left, found and not assumed.
     fn back(&mut self, parent: Mode) -> Outcome {
         let from = self.mode;
-        self.mode = parent;
+        self.set_mode(parent);
         self.filter.clear();
         self.refilter();
         self.sel = self
@@ -344,6 +350,13 @@ impl Palette {
             .position(|&i| self.opener(i) == Some(from))
             .unwrap_or(0);
         Outcome::Restore
+    }
+
+    /// The one place the mode changes after construction, so whatever the
+    /// caller must drop on a mode change is flagged for every sub-list.
+    fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+        self.mode_changed = true;
     }
 
     fn opener(&self, i: usize) -> Option<Mode> {
@@ -649,6 +662,47 @@ mod tests {
             reached.push(sub);
         }
         assert_eq!(reached.iter().filter(|m| m.parent().is_none()).count(), 1);
+    }
+
+    /// Driven off `Action::opens`, so a sub-list added later is covered the
+    /// moment it is declared.
+    #[test]
+    fn only_a_mode_change_is_flagged_to_the_caller() {
+        let mut p = Palette::commands(many(40), None);
+        assert!(!p.take_mode_change());
+        type_str(&mut p, "co");
+        p.key(Key::Down);
+        p.key(Key::Up);
+        p.key(Key::Home);
+        p.key(Key::End);
+        p.key(Key::Backspace);
+        p.wheel(true);
+        p.wheel(false);
+        assert!(!p.take_mode_change());
+        type_str(&mut p, "opy");
+        assert_eq!(labels(&p, 50), ["Copy"]);
+        assert_eq!(p.key(Key::Enter), Outcome::Run(Action::Copy));
+        assert!(!p.take_mode_change());
+
+        let openers: Vec<usize> = COMMANDS
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| c.0.opens().map(|_| i))
+            .collect();
+        assert!(!openers.is_empty());
+        for i in openers {
+            let mut p = Palette::commands(many(40), None);
+            for _ in 0..i {
+                p.key(Key::Down);
+            }
+            p.key(Key::Enter);
+            assert!(p.take_mode_change(), "row {i}");
+            assert!(!p.take_mode_change(), "row {i}");
+            p.key(Key::Down);
+            assert!(!p.take_mode_change(), "row {i}");
+            p.key(Key::Esc);
+            assert!(p.take_mode_change(), "row {i}");
+        }
     }
 
     #[test]

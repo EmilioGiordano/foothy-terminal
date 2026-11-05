@@ -257,8 +257,9 @@ struct App {
     /// palette stays bounded work (docs/02 §3 rule 7).
     themes: Option<overlay::ThemeList>,
     open: Option<Opened>,
-    /// Shown in the palette footer, cleared when it opens. A failed write has
-    /// nowhere else to go: stderr is gone in release (windows_subsystem).
+    /// Shown in the palette footer, cleared when it opens and on every mode
+    /// change. A failed write has nowhere else to go: stderr is gone in
+    /// release (windows_subsystem).
     status: Option<String>,
 }
 
@@ -700,6 +701,12 @@ impl App {
     }
 
     fn palette_outcome(&mut self, outcome: palette::Outcome, event_loop: &ActiveEventLoop) {
+        // Before the match: an arm that sets a notice this turn must keep it.
+        if let Some(open) = self.open.as_mut()
+            && open.palette.take_mode_change()
+        {
+            self.status = None;
+        }
         match outcome {
             palette::Outcome::Stay => self.redraw_soon(),
             palette::Outcome::Preview(i) => {
