@@ -146,7 +146,9 @@ function global:__footChipRead {
     $v = $line.Substring($j + 1)
     # Nothing but colour: any other escape could move the cursor, repaint the
     # screen or leave the terminal in a mode the shell cannot get out of.
-    if ($v -notmatch '^(?:\u001b\[[0-9;]*m|[^\u0000-\u001f\u007f])*$') { return $null }
+    # -cnotmatch, not -notmatch: the default is case-insensitive and would take
+    # ESC [ n M -- delete line -- as an SGR.
+    if ($v -cnotmatch '^(?:\u001b\[[0-9;]*m|[^\u0000-\u001f\u007f-\u009f])*$') { return $null }
     $h[$line.Substring(0, $j)] = $v
   }
   foreach ($k in $global:__footChipKeys) {
