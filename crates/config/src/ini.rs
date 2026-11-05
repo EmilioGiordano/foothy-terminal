@@ -1,4 +1,4 @@
-use crate::{Blink, CursorColors, Partial, PartialColors, Variant};
+use crate::{Blink, ChipStyle, CursorColors, Partial, PartialColors, Variant};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Problem {
@@ -176,6 +176,15 @@ fn main_key(out: &mut Partial, key: &str, value: &str) -> Result<(), String> {
         }
         "paste-warning" => s.paste_warning = Some(boolean(value)?),
         "prompt" => s.prompt = Some(boolean(value)?),
+        "prompt-style" => {
+            s.prompt_style = Some(match value.to_ascii_lowercase().as_str() {
+                "surface" => ChipStyle::Surface,
+                "inverse" => ChipStyle::Inverse,
+                _ => {
+                    return Err(format!("prompt-style '{value}' is not surface or inverse"));
+                }
+            })
+        }
         "theme" => s.theme = Some(value.to_string()),
         "initial-color-theme" => {
             s.initial_variant = Some(match value.to_ascii_lowercase().as_str() {
