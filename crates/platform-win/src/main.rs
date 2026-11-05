@@ -580,7 +580,14 @@ impl App {
     /// None once the text is on the clipboard. The two failures read
     /// differently on purpose: one is the user's to fix, the other is not.
     fn copy_notice(&mut self) -> Option<String> {
-        if !self.panes.focused().is_some_and(|p| p.term.has_selection()) {
+        // selection_text, not has_selection: a click leaves a range that holds
+        // no text, and "copy failed" would be a lie for it.
+        if self
+            .panes
+            .focused()
+            .and_then(|p| p.term.selection_text())
+            .is_none()
+        {
             return Some("Nothing selected: select with the mouse, then copy.".into());
         }
         if !self.copy() {
