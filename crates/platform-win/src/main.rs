@@ -64,9 +64,7 @@ fn prompt_command(cfg: &config::Config, renderer: &Renderer) -> Option<String> {
     )))
 }
 
-/// The chip values a shell already running picks up at its next prompt. Not a
-/// preview: only a committed pick is written, and only the colours the chip
-/// draws itself, which the indexed palette swap cannot reach.
+// Commits only: written from a preview, the file would outlive Esc.
 fn save_chip(cfg: &config::Config, renderer: &Renderer) {
     if !cfg.prompt {
         return;
