@@ -1679,7 +1679,9 @@ fn main() -> anyhow::Result<()> {
     let event_loop = EventLoop::<()>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App::new(event_loop.create_proxy())?;
-    event_loop.run_app(&mut app)?;
+    let out = event_loop.run_app(&mut app);
+    config_file::remove_chip();
+    out?;
     Ok(())
 }
 

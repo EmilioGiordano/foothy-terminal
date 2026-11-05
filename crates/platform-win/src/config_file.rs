@@ -326,6 +326,17 @@ pub fn save_chip(text: &str) -> std::io::Result<()> {
     save_chip_in(&chip_dir(), text)
 }
 
+pub fn remove_chip_in(dir: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_file(dir.join(chip_file())) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+pub fn remove_chip() {
+    let _ = remove_chip_in(&chip_dir());
+}
+
 pub fn save_state(state: &State, field: Field) -> std::io::Result<()> {
     let dir = dir()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "APPDATA is not set"))?;
@@ -915,6 +926,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(text, "chevron=b\n");
         assert!(left.is_empty(), "{left:?}");
+    }
+
+    #[test]
+    fn removing_the_chip_file_takes_it_away_and_tolerates_its_absence() {
+        let dir = std::env::temp_dir().join("foothy-test-chip-remove");
+        let _ = std::fs::remove_dir_all(&dir);
+        save_chip_in(&dir, "chevron=a\n").unwrap();
+        remove_chip_in(&dir).unwrap();
+        let gone = !dir.join(chip_file()).exists();
+        let again = remove_chip_in(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(gone);
+        assert!(again.is_ok(), "{again:?}");
     }
 
     #[test]
