@@ -24,8 +24,6 @@ pub enum Pill {
     Reverse,
 }
 
-/// `None` means the chip leaves the colour alone: the default foreground under
-/// `Pill::Fill`, the swapped pair under `Pill::Reverse`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ChipColors {
     pub pill: Pill,

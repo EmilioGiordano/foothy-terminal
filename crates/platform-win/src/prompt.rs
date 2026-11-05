@@ -72,6 +72,15 @@ fn ink(color: u32) -> String {
     format!("${{e}}[38;2;{}m", rgb(color))
 }
 
+/// Under `Pill::Fill` the colour in effect is the pill's own fill, set for the
+/// cap, so `None` has to reset it or the text comes out invisible on the pill.
+fn ink_or_default(color: Option<u32>) -> String {
+    match color {
+        Some(c) => ink(c),
+        None => "${e}[39m".to_string(),
+    }
+}
+
 /// Under `Pill::Reverse` the cap is printed before `[7m`, or the swap paints
 /// the cap's own shape in the background colour and hollows the end out.
 fn pill_open(
@@ -92,14 +101,10 @@ fn pill_open(
         Pill::Reverse => s.push_str(&format!("{}${{e}}[7m ", g.pill_left)),
     }
     if let Some(icon) = icon {
-        if let Some(c) = icon_ink {
-            s.push_str(&ink(c));
-        }
+        s.push_str(&ink_or_default(icon_ink));
         s.push_str(&format!("{icon} "));
     }
-    if let Some(c) = text {
-        s.push_str(&ink(c));
-    }
+    s.push_str(&ink_or_default(text));
     s
 }
 
@@ -353,6 +358,20 @@ mod tests {
         let s = script(&g, &test_chip(ChipStyle::Inverse));
         let open = format!("${{e}}[0m{}${{e}}[7m", g.pill_left);
         assert!(s.contains(&open), "the cap is inside the reverse:\n{s}");
+    }
+
+    #[test]
+    fn a_fill_pill_resets_the_ink_it_set_for_the_cap() {
+        let bare = ChipColors {
+            pill: Pill::Fill(0x0012_3456),
+            path: None,
+            folder_icon: None,
+            branch: None,
+            branch_icon: None,
+            chevron: 0x00ff_ffff,
+        };
+        let s = script(&Glyphs::pick(nerd), &bare);
+        assert!(s.contains("${e}[39m"), "the ink is left on the pill:\n{s}");
     }
 
     #[test]
