@@ -6,13 +6,13 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| r"C:\Windows\Fonts\CascadiaMono.ttf".to_string());
     let bytes = std::fs::read(&path)?;
     let r = Renderer::new(&bytes, 16.0)?;
-    println!("{path}  celda {:?}\n", r.cell_size());
+    println!("{path}  cell {:?}\n", r.cell_size());
 
     let groups: [(&str, &str); 6] = [
         ("ascii", "Aa1@#"),
         ("latin ext", "áéñüÇ"),
         ("box drawing", "┌─┐│└┘├┼"),
-        ("bloques/powerline", "█▀▄"),
+        ("blocks/powerline", "█▀▄"),
         ("CJK", "中文日本語"),
         ("emoji", "😀🚀✅"),
     ];
@@ -27,7 +27,7 @@ fn main() -> anyhow::Result<()> {
                 missing.push(c)
             }
         }
-        println!("{name:<18} presentes: {ok:<12} FALTAN: {missing}");
+        println!("{name:<18} present: {ok:<12} MISSING: {missing}");
     }
     Ok(())
 }

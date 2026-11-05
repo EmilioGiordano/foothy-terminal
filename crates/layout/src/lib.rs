@@ -790,7 +790,7 @@ mod tests {
         let b = t.split(0, Orientation::Horizontal).unwrap();
         t.resize(0, 5.0);
         let l = t.layout(AREA);
-        assert!(l[&b].w > 1.0, "el hermano quedo en {}", l[&b].w);
+        assert!(l[&b].w > 1.0, "the sibling ended up at {}", l[&b].w);
     }
 
     #[test]
@@ -946,11 +946,7 @@ mod tests {
         assert!(t.move_pane(c, 0, DropZone::Left));
         let mut panes = t.panes();
         panes.sort_unstable();
-        assert_eq!(
-            panes,
-            vec![0, b, c],
-            "no se debe perder ni duplicar ningun pane"
-        );
+        assert_eq!(panes, vec![0, b, c], "no pane may be lost or duplicated");
 
         let l = t.layout(AREA);
         // c ended up left of 0, and b takes the whole right side.
@@ -1094,7 +1090,7 @@ mod tests {
 
         t.drag_divider(id, 10_000.0, AREA);
         let l = t.layout(AREA);
-        assert!(l[&b].w >= 4.0, "el vecino quedo en {}", l[&b].w);
+        assert!(l[&b].w >= 4.0, "the neighbour ended up at {}", l[&b].w);
         assert_close(l[&0].w + l[&b].w, 100.0);
     }
 
@@ -1240,25 +1236,25 @@ mod fuzz {
 
     fn check_invariants(t: &Tree, area: Rect) {
         let panes = t.panes();
-        assert!(!panes.is_empty(), "el arbol se quedo sin panes");
+        assert!(!panes.is_empty(), "the tree ran out of panes");
 
         let mut sorted = panes.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), panes.len(), "hay panes duplicados: {panes:?}");
+        assert_eq!(sorted.len(), panes.len(), "duplicated panes: {panes:?}");
 
         let rects = t.layout(area);
-        assert_eq!(rects.len(), panes.len(), "layout y arbol no coinciden");
+        assert_eq!(rects.len(), panes.len(), "layout and tree disagree");
 
         let total: f32 = rects.values().map(|r| r.w * r.h).sum();
         assert!(
             (total - area.w * area.h).abs() < 0.5,
-            "el area no se cubre: {total} vs {}",
+            "the area is not covered: {total} vs {}",
             area.w * area.h
         );
 
         for r in rects.values() {
-            assert!(r.w > 0.0 && r.h > 0.0, "rectangulo degenerado: {r:?}");
+            assert!(r.w > 0.0 && r.h > 0.0, "degenerate rectangle: {r:?}");
         }
 
         let list: Vec<&Rect> = rects.values().collect();
@@ -1266,7 +1262,7 @@ mod fuzz {
             for b in &list[i + 1..] {
                 let overlap = (a.right().min(b.right()) - a.x.max(b.x)).max(0.0)
                     * (a.bottom().min(b.bottom()) - a.y.max(b.y)).max(0.0);
-                assert!(overlap < 0.5, "se solapan: {a:?} y {b:?}");
+                assert!(overlap < 0.5, "overlapping: {a:?} and {b:?}");
             }
         }
     }
@@ -1311,8 +1307,8 @@ mod fuzz {
                     Direction::Down,
                 ] {
                     if let Some(n) = t.neighbour(p, d, area) {
-                        assert_ne!(n, p, "se devolvio a si mismo");
-                        assert!(panes.contains(&n), "vecino inexistente: {n}");
+                        assert_ne!(n, p, "navigated back to itself");
+                        assert!(panes.contains(&n), "no such neighbour: {n}");
                     }
                 }
             }
@@ -1346,7 +1342,7 @@ mod fuzz {
                     let there_and_back = t.neighbour(n, back, area);
                     assert!(
                         there_and_back.is_some(),
-                        "desde {p} hacia {go:?} llega a {n}, pero {n} no vuelve"
+                        "from {p} going {go:?} reaches {n}, but {n} does not lead back"
                     );
                 }
             }

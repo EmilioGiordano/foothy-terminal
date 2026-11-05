@@ -23,7 +23,7 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or(12usize);
 
     println!(
-        "abriendo {total} panes de {}x{}\n",
+        "opening {total} panes of {}x{}\n",
         size.columns, size.screen_lines
     );
     println!("{:>5}  {:>9}", "pane", "ms");
@@ -53,8 +53,8 @@ fn main() -> anyhow::Result<()> {
     let worst = times.iter().cloned().fold(f64::MIN, f64::max);
     let mean = times.iter().sum::<f64>() / times.len() as f64;
 
-    println!("\nmedia {mean:.1} ms · peor {worst:.1} ms");
-    println!("primero {first:.1} ms · ultimo {last:.1} ms");
+    println!("\nmean {mean:.1} ms · worst {worst:.1} ms");
+    println!("first {first:.1} ms · last {last:.1} ms");
 
     // Constant with N is the point: the last pane must not cost meaningfully
     // more than the first. A generous factor still catches per-pane growth.
@@ -62,12 +62,12 @@ fn main() -> anyhow::Result<()> {
     let ok_budget = worst < budget;
     let ok_constant = last < first.max(mean) * 2.0 + 5.0;
     println!(
-        "\n< {budget:.0} ms por pane : {}",
-        if ok_budget { "OK" } else { "FALLA" }
+        "\n< {budget:.0} ms per pane : {}",
+        if ok_budget { "OK" } else { "FAIL" }
     );
     println!(
-        "constante con N   : {}",
-        if ok_constant { "OK" } else { "FALLA" }
+        "constant with N  : {}",
+        if ok_constant { "OK" } else { "FAIL" }
     );
 
     // Dropping happens off-thread, so give the closes a moment to land.

@@ -12,7 +12,7 @@ use portable_pty::CommandBuilder;
 use vt_core::pty::Pty;
 use vt_core::{TermSize, Terminal};
 
-const LINE: &str = "hola mundo test";
+const LINE: &str = "hello world test";
 
 fn vk_for(c: char) -> u16 {
     match c {
@@ -71,17 +71,17 @@ fn main() -> anyhow::Result<()> {
     }
 
     if mode == "diag" {
-        println!("--- tras ENABLE, mando 'x' legacy ---");
+        println!("--- after ENABLE, sending legacy 'x' ---");
         pty.write(b"x")?;
         pump(&mut pty, &mut term, 600);
-        println!("linea: {:?}", term.line_text(0));
+        println!("line: {:?}", term.line_text(0));
 
-        println!("--- ahora 'y' en win32 ---");
+        println!("--- now 'y' in win32 ---");
         pty.write(&win32_press(b'Y' as u16, 'y' as u16, Mods::NONE))?;
         pump(&mut pty, &mut term, 600);
-        println!("linea: {:?}", term.line_text(0));
+        println!("line: {:?}", term.line_text(0));
 
-        println!("--- pantalla completa ---");
+        println!("--- full screen ---");
         println!("{}", term.screen_text());
         return Ok(());
     }
@@ -109,26 +109,26 @@ fn main() -> anyhow::Result<()> {
 
     let after = term.line_text(0);
 
-    println!("modo     : {mode}");
-    println!("antes    : {before}");
-    println!("despues  : {after}");
+    println!("mode     : {mode}");
+    println!("before   : {before}");
+    println!("after    : {after}");
 
     let strip = |s: &str| s.rsplit('>').next().unwrap_or("").trim().to_string();
     let (b, a) = (strip(&before), strip(&after));
     println!();
-    println!("linea antes   : {b:?}");
-    println!("linea despues : {a:?}");
+    println!("line before   : {b:?}");
+    println!("line after    : {a:?}");
 
-    let verdict = if a == "hola mundo" {
-        "BORRO LA PALABRA  <-- lo que queremos"
-    } else if a == "hola mundo tes" {
-        "borro un solo caracter"
+    let verdict = if a == "hello world" {
+        "DELETED THE WORD  <-- what we want"
+    } else if a == "hello world tes" {
+        "deleted a single character"
     } else if a.contains('^') {
-        "INSERTO BASURA en la linea"
+        "INSERTED GARBAGE into the line"
     } else {
-        "otro resultado"
+        "other result"
     };
-    println!("veredicto     : {verdict}");
+    println!("verdict       : {verdict}");
 
     Ok(())
 }
