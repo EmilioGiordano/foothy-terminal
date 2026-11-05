@@ -64,16 +64,13 @@ fn prompt_command(cfg: &config::Config, renderer: &Renderer) -> Option<String> {
     )))
 }
 
-// Commits only: written from a preview, the file would outlive Esc.
-fn save_chip(cfg: &config::Config, renderer: &Renderer) {
+fn chip_values(cfg: &config::Config, renderer: &Renderer) -> Option<String> {
     if !cfg.prompt {
-        return;
+        return None;
     }
     let glyphs = prompt::Glyphs::pick(|c| renderer.has_glyph(c));
     let colors = config::chip_colors(&cfg.colors, cfg.prompt_style);
-    if let Err(e) = config_file::save_chip(&prompt::values_file(&glyphs, &colors)) {
-        eprintln!("foothy: could not write {}: {e}", config_file::CHIP_FILE);
-    }
+    Some(prompt::values_file(&glyphs, &colors))
 }
 
 fn preview(text: &str) -> String {
@@ -341,7 +338,10 @@ impl App {
 
         let mut panes = Panes::new(header_h, cell_w);
         panes.set_prompt(prompt_command(&cfg, &renderer));
-        save_chip(&cfg, &renderer);
+        let chip = chip_values(&cfg, &renderer).map(|t| config_file::save_chip_if_absent(&t));
+        if let Some(Err(e)) = chip {
+            eprintln!("foothy: could not write {}: {e}", config_file::CHIP_FILE);
+        }
         Ok(Self {
             proxy,
             window: None,
@@ -846,10 +846,11 @@ impl App {
             return false;
         };
         self.show_theme(i);
-        save_chip(&self.cfg, &self.renderer);
+        let chip = self.save_chip();
         self.current_theme = Some(name.clone());
         self.state.theme = Some(name);
-        self.save_state(config_file::Field::Theme)
+        let failed = self.save_state(config_file::Field::Theme);
+        failed | self.note_chip(chip)
     }
 
     fn commit_style(&mut self, i: usize) -> bool {
@@ -857,12 +858,37 @@ impl App {
             return false;
         };
         self.show_style(style);
-        save_chip(&self.cfg, &self.renderer);
+        let chip = self.save_chip();
         // Also into `files`: a later theme preview re-composes from it and
         // would otherwise bring the old style back.
         self.files.settings.prompt_style = Some(style);
         self.state.prompt_style = Some(style);
-        self.save_state(config_file::Field::PromptStyle)
+        let failed = self.save_state(config_file::Field::PromptStyle);
+        failed | self.note_chip(chip)
+    }
+
+    // Commits only: written from a preview, the file would outlive Esc.
+    fn save_chip(&self) -> std::io::Result<()> {
+        match chip_values(&self.cfg, &self.renderer) {
+            Some(text) => config_file::save_chip(&text),
+            None => Ok(()),
+        }
+    }
+
+    fn note_chip(&mut self, out: std::io::Result<()>) -> bool {
+        match out {
+            Ok(()) => false,
+            Err(e) => {
+                eprintln!("foothy: could not write {}: {e}", config_file::CHIP_FILE);
+                if self.status.is_none() {
+                    self.status = Some(format!(
+                        "Could not save {}: the chip keeps its current colours.",
+                        config_file::CHIP_FILE
+                    ));
+                }
+                true
+            }
+        }
     }
 
     fn save_state(&mut self, field: config_file::Field) -> bool {
