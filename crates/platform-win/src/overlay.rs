@@ -4,14 +4,11 @@ use render::Renderer;
 use crate::config_file;
 use crate::palette::{Half, Mode, Palette, ThemeEntry};
 
-/// Enough cells to recognise a theme: background, foreground and four hues.
 pub const SWATCH: usize = 6;
 pub const MAX_COLS: usize = 76;
 const MAX_ROWS: usize = 18;
 const CHROME_LINES: usize = 2;
 
-/// Built once and kept: ~86 files, and work per event-loop turn is bounded
-/// (docs/02 §3 rule 7). The resolved layer is kept so a preview never re-reads.
 pub struct ThemeList {
     pub entries: Vec<ThemeEntry>,
     pub layers: Vec<Partial>,
@@ -29,7 +26,7 @@ impl ThemeList {
         };
         let mut problems = Vec::new();
         // Resolving each theme to a full Config would rebuild the 256-colour
-        // palette 86 times, which is most of the cost of opening the palette.
+        // palette 86 times.
         let fallback = config::default_palette();
         for name in config_file::theme_names(&user) {
             let (layer, found) = config_file::theme_layer(&name, &read);
@@ -53,9 +50,8 @@ impl ThemeList {
 }
 
 pub struct Layout {
-    /// Visible list rows. The same number must reach `visible` and `marker`.
+    /// The same number must reach `visible` and `marker`.
     pub rows: usize,
-    /// Cells across the inside, the marker track included.
     pub cols: usize,
     pub x: usize,
     pub y: usize,
@@ -67,8 +63,6 @@ pub struct Layout {
     pub footer_y: usize,
 }
 
-/// `None` when the window is too small to hold a usable box: half a palette is
-/// worse than none.
 pub fn layout(
     win: (usize, usize),
     cell: (usize, usize),
@@ -110,12 +104,8 @@ pub fn layout(
     })
 }
 
-/// The label is what a row is; the tag only repeats a shortcut. A box too
-/// narrow for both keeps this many cells for the label, clips the tag and
-/// drops the swatch.
 const MIN_LABEL_COLS: usize = 8;
 
-/// Cells from the left of the list, the one-cell indent included.
 #[derive(Debug)]
 struct RowSpans {
     label: (usize, usize),
@@ -152,8 +142,6 @@ struct Look {
     sel_fg: u32,
 }
 
-/// Every colour comes from the resolved config: the overlay is part of the
-/// theme, and a constant would clash with half the catalogue.
 fn look(cfg: &Config) -> Look {
     let (sel_fg, sel_bg) = match cfg.colors.selection {
         Some(s) => (s.foreground, s.background),
@@ -168,8 +156,6 @@ fn look(cfg: &Config) -> Look {
     }
 }
 
-/// What Esc does is read from `Mode::parent`, the same fact the key handler
-/// uses, so a sub-list added later cannot end up promising the wrong key.
 fn footer(mode: Mode) -> &'static str {
     match (mode, mode.parent().is_some()) {
         (Mode::Themes, true) => "Enter: keep   Esc: back   Up/Down: preview",
@@ -412,8 +398,6 @@ mod tests {
         Renderer::new(&bytes, 16.0, &config::default_palette()).ok()
     }
 
-    /// Drawing is where an index can go out of range: the swatch, the marker
-    /// and the right-aligned tag all derive their x from the box width.
     #[test]
     fn drawing_paints_inside_the_box_and_never_panics() {
         let Some(mut r) = renderer() else {
@@ -449,8 +433,6 @@ mod tests {
         }
     }
 
-    /// Lets a human look at the overlay without opening a window:
-    /// `cargo test -p platform-win dump_the_palette -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn dump_the_palette() {
@@ -486,7 +468,6 @@ mod tests {
         println!("wrote {}", path.display());
     }
 
-    /// A theme must not reach the session through the swatch path either.
     #[test]
     fn the_catalogue_keeps_the_filtered_theme_layer() {
         let (list, _) = ThemeList::build();
