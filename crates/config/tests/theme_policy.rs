@@ -3,7 +3,7 @@ use config::{PartialColors, Settings, Variant, bundled, into_variant, parse_them
 #[test]
 fn a_theme_contributes_colours_and_the_variant_and_nothing_else() {
     let (p, problems) = parse_theme(
-        "[main]\ninitial-color-theme=light\npaste-warning=no\nfont=C:\\evil.ttf\nblink=1\nalpha=0\nfont-size=50\npad=40\ntheme=nord\n[colors-dark]\nbackground=111111\n[colors-light]\nbackground=eeeeee\n",
+        "[main]\ninitial-color-theme=light\npaste-warning=no\nprompt=no\nfont=C:\\evil.ttf\nblink=1\nalpha=0\nfont-size=50\npad=40\ntheme=nord\n[colors-dark]\nbackground=111111\n[colors-light]\nbackground=eeeeee\n",
     );
     assert!(problems.is_empty(), "{problems:?}");
     assert_eq!(
