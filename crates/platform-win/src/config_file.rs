@@ -1,5 +1,3 @@
-//! The only layer allowed to know where the files live.
-
 use std::path::PathBuf;
 
 use config::{
@@ -8,10 +6,9 @@ use config::{
 };
 
 pub const FONT_PX: f32 = 16.0;
-// foot's own default is pad=0x0 (doc/foot.ini.5.scd).
 pub const PAD: u32 = 0;
-/// foothy's identity, not foot's: layer 3 supplies it as the bottom layer so a
-/// user with no foothy.ini sees these and not config's 242424/ffffff.
+/// Supplied here as the bottom layer, so a user with no foothy.ini sees these
+/// and not config's own defaults.
 pub const BG: u32 = 0x0016_2a33;
 pub const FG: u32 = 0x00cf_ecf7;
 pub const ALPHA: u8 = 235;
@@ -28,8 +25,6 @@ fn dir() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("foothy"))
 }
 
-/// `None` for a missing file, which is the normal case; any other IO error is
-/// a problem to report, not a reason to refuse to start.
 fn slurp(path: &std::path::Path, problems: &mut Vec<String>) -> Option<String> {
     match std::fs::read_to_string(path) {
         Ok(text) => Some(text),
@@ -41,7 +36,7 @@ fn slurp(path: &std::path::Path, problems: &mut Vec<String>) -> Option<String> {
     }
 }
 
-/// Reads `%APPDATA%\foothy`. Never writes: foothy.ini is the user's.
+/// Never writes: foothy.ini is the user's.
 pub fn load_from_disk() -> Loaded {
     let io = std::cell::RefCell::new(Vec::new());
     let dir = dir();
@@ -58,8 +53,6 @@ pub fn load_from_disk() -> Loaded {
     out
 }
 
-/// `app defaults < state.ini < foothy.ini < FOOTWIN_*`, with a named theme
-/// merged under every user layer so an explicit `background=` still wins.
 pub fn load(
     read: impl Fn(&str) -> Option<String>,
     user_theme: impl Fn(&str) -> Option<String>,
@@ -114,17 +107,15 @@ pub fn load(
     }
 }
 
-/// Reserved on Windows in every directory and with any extension. Opening one
-/// reaches the device, and a serial port can block the read instead of failing.
+/// Reserved in every directory and with any extension; opening one reaches the
+/// device, and a serial port blocks the read instead of failing.
 const DEVICE_NAMES: [&str; 22] = [
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
-/// A theme is a file people copy from the internet, so it names a file inside
-/// the themes directory and nothing else. An allowlist, not a blocklist: Win32
-/// still resolves `COM1 .theme` and `CONIN$` to a device, and a trailing space
-/// or a `$` would slip past any list of spellings. Every bundled name fits.
+/// An allowlist, not a blocklist: Win32 still resolves `COM1 .theme` and
+/// `CONIN$` to a device, so no list of spellings is enough.
 fn is_theme_name(name: &str) -> bool {
     if name.is_empty() || name.starts_with('.') || name.ends_with('.') {
         return false;
@@ -156,8 +147,6 @@ fn defaults(variant: Variant) -> Partial {
     )
 }
 
-/// Deliberately not routed through the ini parser: these keep exactly the
-/// semantics they had before there was a config file.
 fn from_env(variant: Variant, env: &impl Fn(&str) -> Option<String>) -> Partial {
     let hex =
         |key: &str| env(key).and_then(|v| u32::from_str_radix(v.trim_start_matches('#'), 16).ok());
@@ -216,7 +205,6 @@ mod tests {
 
     #[test]
     fn the_default_palette_is_foots() {
-        // upstream/foot/config.c:33-86
         let p = config::default_palette();
         assert_eq!(p[0], 0x0024_2424);
         assert_eq!(p[1], 0x00f6_2b5a);
@@ -356,9 +344,6 @@ mod tests {
 
     #[test]
     fn a_theme_name_cannot_be_a_windows_device() {
-        // Every one of these is resolved to a device by Win32, verified with
-        // RtlIsDosDeviceName_U; the trailing space and the `$` forms are why
-        // this is an allowlist and not a list of spellings.
         for name in [
             "NUL",
             "nul",
@@ -383,7 +368,6 @@ mod tests {
         }
     }
 
-    /// The allowlist must not outgrow the catalogue it has to admit.
     #[test]
     fn every_bundled_theme_name_is_accepted() {
         for name in config::bundled_names() {
