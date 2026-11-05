@@ -168,10 +168,13 @@ fn look(cfg: &Config) -> Look {
     }
 }
 
+/// What Esc does is read from `Mode::parent`, the same fact the key handler
+/// uses, so a sub-list added later cannot end up promising the wrong key.
 fn footer(mode: Mode) -> &'static str {
-    match mode {
-        Mode::Commands => "Enter: run   Esc: close   Type to filter",
-        Mode::Themes => "Enter: keep   Esc: back   Up/Down: preview",
+    match (mode, mode.parent().is_some()) {
+        (Mode::Themes, true) => "Enter: keep   Esc: back   Up/Down: preview",
+        (_, true) => "Enter: choose   Esc: back   Type to filter",
+        (_, false) => "Enter: run   Esc: close   Type to filter",
     }
 }
 
