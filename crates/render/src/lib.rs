@@ -63,7 +63,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(font_bytes: &[u8], px: f32) -> anyhow::Result<Self> {
+    pub fn new(font_bytes: &[u8], px: f32, palette: &[u32; 256]) -> anyhow::Result<Self> {
         let px = sane_px(px);
         let font = Font::from_bytes(
             font_bytes,
@@ -83,8 +83,7 @@ impl Renderer {
             cell_w,
             cell_h,
             baseline,
-            // The theme is the caller's: this layer only knows pixels.
-            palette: [0; 256],
+            palette: *palette,
             glyphs: HashMap::new(),
             pad: 0,
             fg: DEFAULT_FG,
@@ -582,8 +581,14 @@ mod tests {
         panic!("no monospace font found; tried {FONT_CANDIDATES:?}");
     }
 
+    /// Distinct and non-zero everywhere, so a palette that was never installed
+    /// cannot pass for an installed one.
+    fn test_palette() -> [u32; 256] {
+        std::array::from_fn(|i| 0x0001_0000 | i as u32)
+    }
+
     fn renderer() -> Renderer {
-        Renderer::new(&font_bytes(), 16.0).unwrap()
+        Renderer::new(&font_bytes(), 16.0, &test_palette()).unwrap()
     }
 
     /// A size out of range used to abort the process inside fontdue, so this
@@ -600,7 +605,7 @@ mod tests {
             0.0,
             1000.0,
         ] {
-            let mut r = Renderer::new(&bytes, px).unwrap();
+            let mut r = Renderer::new(&bytes, px, &test_palette()).unwrap();
             let got = r.font_size();
             assert!(
                 got.is_finite() && (MIN_FONT_PX..=MAX_FONT_PX).contains(&got),
@@ -951,6 +956,18 @@ mod tests {
 
         let beyond = (0..ch).any(|y| (limit..w).any(|x| buf[y * w + x] != DEFAULT_BG));
         assert!(!beyond, "draw_text wrote past max_w");
+    }
+
+    #[test]
+    fn a_fresh_renderer_resolves_the_palette_it_was_built_with() {
+        let p = test_palette();
+        let r = renderer();
+        for i in 0..256u16 {
+            assert_eq!(
+                r.resolve(Color::Indexed(i as u8), DEFAULT_FG),
+                p[i as usize]
+            );
+        }
     }
 
     #[test]

@@ -246,17 +246,17 @@ struct App {
 /// A bad `font=` must not stop the terminal from opening, and a file that
 /// exists is not a font: a truncated download or an unsupported container
 /// reads fine and fails inside fontdue, so both errors fall back.
-fn build_renderer(font: Option<&str>, px: f32) -> anyhow::Result<Renderer> {
+fn build_renderer(font: Option<&str>, px: f32, palette: &[u32; 256]) -> anyhow::Result<Renderer> {
     if let Some(path) = font {
         match std::fs::read(path).map_err(|e| anyhow::anyhow!("{e}")) {
-            Ok(bytes) => match Renderer::new(&bytes, px) {
+            Ok(bytes) => match Renderer::new(&bytes, px, palette) {
                 Ok(r) => return Ok(r),
                 Err(e) => eprintln!("foothy: font '{path}': {e}"),
             },
             Err(e) => eprintln!("foothy: font '{path}': {e}"),
         }
     }
-    Renderer::new(&std::fs::read(FONT_PATH)?, px)
+    Renderer::new(&std::fs::read(FONT_PATH)?, px, palette)
 }
 
 impl App {
@@ -267,10 +267,9 @@ impl App {
         }
         let cfg = loaded.config;
 
-        let mut renderer = build_renderer(cfg.font.as_deref(), cfg.font_size)?;
+        let mut renderer = build_renderer(cfg.font.as_deref(), cfg.font_size, &cfg.colors.palette)?;
         renderer.set_padding(cfg.pad as usize);
         renderer.set_colors(cfg.colors.foreground, cfg.colors.background);
-        renderer.set_palette(&cfg.colors.palette);
         let header_h = renderer.header_height();
         let cell_w = renderer.cell_size().0;
         let pick = |candidates: &[char], fallback: char| {
@@ -1245,11 +1244,18 @@ mod tests {
     fn an_unreadable_and_an_unparsable_font_both_fall_back() {
         let bad = std::env::temp_dir().join("foothy-not-a-font.ttf");
         std::fs::write(&bad, b"not a font at all").unwrap();
-        let built = build_renderer(bad.to_str(), 16.0);
+        let built = build_renderer(bad.to_str(), 16.0, &config::default_palette());
         let _ = std::fs::remove_file(&bad);
         assert!(built.is_ok(), "{:?}", built.err());
 
-        assert!(build_renderer(Some(r"Z:\does-not-exist.ttf"), 16.0).is_ok());
+        assert!(
+            build_renderer(
+                Some(r"Z:\does-not-exist.ttf"),
+                16.0,
+                &config::default_palette()
+            )
+            .is_ok()
+        );
     }
 
     #[test]
