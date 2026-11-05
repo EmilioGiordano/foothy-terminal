@@ -325,7 +325,7 @@ mod tests {
 
     fn renderer() -> Option<Renderer> {
         let bytes = std::fs::read(r"C:\Windows\Fonts\CascadiaMono.ttf").ok()?;
-        Renderer::new(&bytes, 16.0).ok()
+        Renderer::new(&bytes, 16.0, &config::default_palette()).ok()
     }
 
     /// Drawing is where an index can go out of range: the swatch, the marker
