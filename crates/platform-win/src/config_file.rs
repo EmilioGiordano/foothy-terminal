@@ -111,8 +111,6 @@ pub fn theme_names(user: &[String]) -> Vec<String> {
     names
 }
 
-/// `None` for a missing file, which is the normal case; any other IO error is
-/// a problem to report, not a reason to refuse to start.
 fn slurp(path: &std::path::Path, problems: &mut Vec<String>) -> Option<String> {
     match std::fs::read_to_string(path) {
         Ok(text) => Some(text),
@@ -288,8 +286,6 @@ fn hex(env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<u32> {
     env(key).and_then(|v| u32::from_str_radix(v.trim_start_matches('#'), 16).ok())
 }
 
-/// Deliberately not routed through the ini parser: these keep exactly the
-/// semantics they had before there was a config file.
 fn from_env(variant: Variant, env: &impl Fn(&str) -> Option<String>) -> Partial {
     fn num<T: std::str::FromStr>(env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<T> {
         env(key).and_then(|v| v.parse().ok())
