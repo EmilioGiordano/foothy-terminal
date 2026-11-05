@@ -944,6 +944,28 @@ mod tests {
     }
 
     #[test]
+    fn reverse_video_fills_the_cell_with_the_foreground_and_follows_a_theme() {
+        // The inverse prompt chip is spaces under SGR 7: it is a slab only if
+        // the swap resolves the default pair, and it does so every frame.
+        let mut r = renderer();
+        r.set_colors(0x00dc_ecf5, 0x0016_2a33);
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        let mut term = Terminal::new(TermSize::new(4, 2));
+        term.feed(b"\x1b[7m  ");
+
+        let slab = |r: &mut Renderer| {
+            let mut buf = vec![0u32; w * h];
+            r.clear(&mut buf);
+            r.draw(&term, &mut buf, w, h, CursorLook::Hidden);
+            buf[(ch / 2) * w + cw + cw / 2]
+        };
+        assert_eq!(slab(&mut r), 0x00dc_ecf5);
+        r.set_colors(0x0000_0000, 0x00ff_ffff);
+        assert_eq!(slab(&mut r), 0x0000_0000);
+    }
+
+    #[test]
     fn a_fresh_renderer_resolves_the_palette_it_was_built_with() {
         let p = test_palette();
         let r = renderer();
