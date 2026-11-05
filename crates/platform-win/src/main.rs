@@ -56,7 +56,26 @@ fn prompt_command(cfg: &config::Config, renderer: &Renderer) -> Option<String> {
     }
     let glyphs = prompt::Glyphs::pick(|c| renderer.has_glyph(c));
     let colors = config::chip_colors(&cfg.colors, cfg.prompt_style);
-    Some(prompt::encoded_command(&prompt::script(&glyphs, &colors)))
+    let path = config_file::chip_path();
+    Some(prompt::encoded_command(&prompt::script(
+        &glyphs,
+        &colors,
+        path.as_deref(),
+    )))
+}
+
+/// The chip values a shell already running picks up at its next prompt. Not a
+/// preview: only a committed pick is written, and only the colours the chip
+/// draws itself, which the indexed palette swap cannot reach.
+fn save_chip(cfg: &config::Config, renderer: &Renderer) {
+    if !cfg.prompt {
+        return;
+    }
+    let glyphs = prompt::Glyphs::pick(|c| renderer.has_glyph(c));
+    let colors = config::chip_colors(&cfg.colors, cfg.prompt_style);
+    if let Err(e) = config_file::save_chip(&prompt::values_file(&glyphs, &colors)) {
+        eprintln!("foothy: could not write {}: {e}", config_file::CHIP_FILE);
+    }
 }
 
 fn preview(text: &str) -> String {
@@ -324,6 +343,7 @@ impl App {
 
         let mut panes = Panes::new(header_h, cell_w);
         panes.set_prompt(prompt_command(&cfg, &renderer));
+        save_chip(&cfg, &renderer);
         Ok(Self {
             proxy,
             window: None,
@@ -659,8 +679,8 @@ impl App {
         self.renderer
             .set_colors(cfg.colors.foreground, cfg.colors.background);
         self.renderer.set_palette(&cfg.colors.palette);
-        // The chip's colours are baked into the script, so a theme change has
-        // to rebuild it; only a pane opened after this one sees the new one.
+        // The values baked into the script are what a pane that cannot read
+        // the chip file falls back to, so a theme change has to rebuild them.
         self.panes.set_prompt(prompt_command(cfg, &self.renderer));
         if self.hwnd != 0 {
             chrome::set_dark_titlebar(self.hwnd as _, cfg.variant == config::Variant::Dark);
@@ -828,6 +848,7 @@ impl App {
             return false;
         };
         self.show_theme(i);
+        save_chip(&self.cfg, &self.renderer);
         self.current_theme = Some(name.clone());
         self.state.theme = Some(name);
         self.save_state(config_file::Field::Theme)
@@ -838,6 +859,7 @@ impl App {
             return false;
         };
         self.show_style(style);
+        save_chip(&self.cfg, &self.renderer);
         // Also into `files`: a later theme preview re-composes from it and
         // would otherwise bring the old style back.
         self.files.settings.prompt_style = Some(style);

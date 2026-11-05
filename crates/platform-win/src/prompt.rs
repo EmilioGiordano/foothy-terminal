@@ -120,6 +120,41 @@ fn pill_close(g: &Glyphs, pill: Pill) -> String {
 // Split-Path in particular cannot take -LiteralPath and -Parent together in
 // Windows PowerShell 5.1 -- the parameter sets conflict and it throws.
 const TEMPLATE: &str = r#"
+$global:__footChipFile = '@VALUES@'
+$global:__footChipKeys = @('path-on', 'path-off', 'branch-on', 'branch-off', 'chevron')
+
+function global:__footChipRead {
+  $f = $global:__footChipFile
+  if (-not $f) { return $null }
+  $i = $null
+  try { $i = [System.IO.FileInfo]::new($f) } catch { return $null }
+  # Sized before it is read: a huge file would stall every prompt.
+  if (-not $i.Exists -or $i.Length -lt 1 -or $i.Length -gt 4096) { return $null }
+  $t = $null
+  try { $t = [System.IO.File]::ReadAllText($f) } catch { return $null }
+  # The app may be renaming over this file while it is read, so a file that
+  # does not end on a newline is a half-written one and gets no say.
+  if (-not $t.EndsWith("`n")) { return $null }
+  $h = @{}
+  # foreach, not ForEach-Object: 'return' inside a pipeline block leaves only
+  # the block, and a rejected line would then be skipped instead of fatal.
+  foreach ($line in $t.Split("`n")) {
+    $line = $line.TrimEnd("`r")
+    if ($line.Length -lt 1 -or $line[0] -eq '#') { continue }
+    $j = $line.IndexOf('=')
+    if ($j -lt 1) { return $null }
+    $v = $line.Substring($j + 1)
+    # Nothing but colour: any other escape could move the cursor, repaint the
+    # screen or leave the terminal in a mode the shell cannot get out of.
+    if ($v -notmatch '^(?:\u001b\[[0-9;]*m|[^\u0000-\u001f\u007f])*$') { return $null }
+    $h[$line.Substring(0, $j)] = $v
+  }
+  foreach ($k in $global:__footChipKeys) {
+    if (-not $h.ContainsKey($k)) { return $null }
+  }
+  return $h
+}
+
 function global:__footBranch {
   if ($PWD.Provider.Name -ne 'FileSystem') { return $null }
   $d = $PWD.ProviderPath
@@ -180,36 +215,68 @@ function global:prompt {
     if ($p.Length -gt $budget) { $p = '@ELL@' + $p.Substring($p.Length - $budget + 1) }
   }
 
-  $out = "@PATH_ON@" + $p + "@PATH_OFF@"
-  if ($b) { $out += "@BRANCH_ON@" + $b + "@BRANCH_OFF@" }
+  # Read on every render, so a commit reaches the shell already running here.
+  # The values baked in at pane open stand in for anything unreadable.
+  $c = @{
+    'path-on' = "@PATH_ON@"; 'path-off' = "@PATH_OFF@";
+    'branch-on' = "@BRANCH_ON@"; 'branch-off' = "@BRANCH_OFF@";
+    'chevron' = "@CHEVRON@"
+  }
+  try { $o = __footChipRead; if ($o) { $c = $o } } catch { }
+
+  $out = $c['path-on'] + $p + $c['path-off']
+  if ($b) { $out += $c['branch-on'] + $b + $c['branch-off'] }
 
   # The chip goes out as ordinary output and only the chevron is returned as the
   # prompt. A prompt PSReadLine believes is one line but that wraps after a
   # resize puts its cursor arithmetic out by a row, and it then reads part of
   # the chip back as typed input. Two cells cannot wrap.
   Write-Host $out
-  "@CHEVRON@" + ' '
+  $c['chevron'] + ' '
 }
 "#;
 
-/// The PowerShell that replaces the stock `PS C:\...>` prompt.
-pub fn script(g: &Glyphs, p: &ChipColors) -> String {
+pub const KEYS: [&str; 5] = ["path-on", "path-off", "branch-on", "branch-off", "chevron"];
+
+fn fragments(g: &Glyphs, p: &ChipColors) -> [String; 5] {
+    [
+        pill_open(g, p.pill, g.folder, p.folder_icon, p.path),
+        pill_close(g, p.pill),
+        pill_open(g, p.pill, g.branch, p.branch_icon, p.branch),
+        pill_close(g, p.pill),
+        format!("{}{}${{e}}[0m", ink(p.chevron), g.chevron),
+    ]
+}
+
+/// The PowerShell that replaces the stock `PS C:\...>` prompt. `values` is the
+/// file the prompt re-reads on every render, if the app can write one.
+pub fn script(g: &Glyphs, p: &ChipColors, values: Option<&std::path::Path>) -> String {
+    let f = fragments(g, p);
+    // A single-quoted PowerShell literal takes anything but a quote of its own.
+    let path = values
+        .map(|p| p.display().to_string().replace('\'', "''"))
+        .unwrap_or_default();
     TEMPLATE
-        .replace(
-            "@PATH_ON@",
-            &pill_open(g, p.pill, g.folder, p.folder_icon, p.path),
-        )
-        .replace("@PATH_OFF@", &pill_close(g, p.pill))
-        .replace(
-            "@BRANCH_ON@",
-            &pill_open(g, p.pill, g.branch, p.branch_icon, p.branch),
-        )
-        .replace("@BRANCH_OFF@", &pill_close(g, p.pill))
-        .replace(
-            "@CHEVRON@",
-            &format!("{}{}${{e}}[0m", ink(p.chevron), g.chevron),
-        )
+        .replace("@PATH_ON@", &f[0])
+        .replace("@PATH_OFF@", &f[1])
+        .replace("@BRANCH_ON@", &f[2])
+        .replace("@BRANCH_OFF@", &f[3])
+        .replace("@CHEVRON@", &f[4])
         .replace("@ELL@", &g.ellipsis.to_string())
+        .replace("@VALUES@", &path)
+}
+
+/// The same fragments as a file the running prompt reads, with the escape the
+/// script spells `${e}` written out as the byte itself.
+pub fn values_file(g: &Glyphs, p: &ChipColors) -> String {
+    let mut out = String::from("# Generated by foothy. Derived from state.ini; edits are lost.\n");
+    for (key, fragment) in KEYS.iter().zip(fragments(g, p)) {
+        out.push_str(key);
+        out.push('=');
+        out.push_str(&fragment.replace("${e}", "\u{1b}"));
+        out.push('\n');
+    }
+    out
 }
 
 fn utf16le(s: &str) -> Vec<u8> {
@@ -320,8 +387,20 @@ mod tests {
     #[test]
     fn every_placeholder_is_filled_in() {
         for style in [ChipStyle::Surface, ChipStyle::Inverse] {
-            let s = script(&Glyphs::pick(cascadia), &test_chip(style));
-            assert!(!s.contains('@'), "a placeholder survived:\n{s}");
+            let s = script(&Glyphs::pick(cascadia), &test_chip(style), None);
+            // PowerShell's own @{ and @( use the same character, so only an
+            // @NAME@ in capitals counts as one of ours.
+            let left: Vec<&str> = s
+                .match_indices('@')
+                .filter_map(|(i, _)| {
+                    let rest = &s[i + 1..];
+                    let end = rest.find('@')?;
+                    let name = &rest[..end];
+                    (!name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c == '_'))
+                        .then_some(name)
+                })
+                .collect();
+            assert!(left.is_empty(), "a placeholder survived: {left:?}");
         }
     }
 
@@ -329,7 +408,7 @@ mod tests {
     fn the_escape_is_written_so_powershell_cannot_read_it_as_an_index() {
         // "$e[38;..." would be parsed as indexing $e; "${e}[38;..." cannot be.
         for style in [ChipStyle::Surface, ChipStyle::Inverse] {
-            let s = script(&Glyphs::pick(cascadia), &test_chip(style));
+            let s = script(&Glyphs::pick(cascadia), &test_chip(style), None);
             assert!(s.contains("${e}["));
             assert!(!s.contains("$e["));
         }
@@ -337,14 +416,18 @@ mod tests {
 
     #[test]
     fn surface_comes_out_as_decimal_channels() {
-        let s = script(&Glyphs::pick(cascadia), &palette());
+        let s = script(&Glyphs::pick(cascadia), &palette(), None);
         assert!(s.contains("38;2;220;236;245"), "path colour missing");
         assert!(s.contains("48;2;50;69;78"), "pill fill missing");
     }
 
     #[test]
     fn inverse_paints_the_pill_with_the_reverse_attribute() {
-        let s = script(&Glyphs::pick(cascadia), &test_chip(ChipStyle::Inverse));
+        let s = script(
+            &Glyphs::pick(cascadia),
+            &test_chip(ChipStyle::Inverse),
+            None,
+        );
         assert!(s.contains("${e}[7m"), "the reverse pill is missing");
         assert!(!s.contains("48;2;"), "inverse must not name a background");
         assert!(s.contains("38;2;95;179;161"), "chevron colour missing");
@@ -355,7 +438,7 @@ mod tests {
         // Inside [7m the cap glyph is drawn in the background colour, which
         // hollows the rounded end out instead of filling it.
         let g = Glyphs::pick(cascadia);
-        let s = script(&g, &test_chip(ChipStyle::Inverse));
+        let s = script(&g, &test_chip(ChipStyle::Inverse), None);
         let open = format!("${{e}}[0m{}${{e}}[7m", g.pill_left);
         assert!(s.contains(&open), "the cap is inside the reverse:\n{s}");
     }
@@ -370,8 +453,62 @@ mod tests {
             branch_icon: None,
             chevron: 0x00ff_ffff,
         };
-        let s = script(&Glyphs::pick(nerd), &bare);
+        let s = script(&Glyphs::pick(nerd), &bare, None);
         assert!(s.contains("${e}[39m"), "the ink is left on the pill:\n{s}");
+    }
+
+    #[test]
+    fn the_values_path_goes_in_as_a_literal_a_quote_cannot_escape() {
+        let path = std::path::Path::new(r"C:\it's\chip.conf");
+        let s = script(&Glyphs::pick(nerd), &palette(), Some(path));
+        assert!(s.contains(r"'C:\it''s\chip.conf'"), "{s}");
+        let bare = script(&Glyphs::pick(nerd), &palette(), None);
+        assert!(bare.contains("__footChipFile = ''"), "{bare}");
+    }
+
+    /// The rules `__footChipRead` enforces. Mirrored here so the generator and
+    /// the validator cannot drift: a file the prompt rejects is a chip that
+    /// silently stays on the values baked in at pane open.
+    #[test]
+    fn the_values_file_passes_the_check_the_prompt_makes_of_it() {
+        for style in ChipStyle::ALL {
+            let text = values_file(&Glyphs::pick(nerd), &test_chip(style));
+            assert!(text.ends_with('\n'), "{text:?}");
+            assert!(text.len() <= 4096, "{} bytes", text.len());
+            assert!(!text.contains("${e}"), "an unresolved escape:\n{text:?}");
+            let mut found = Vec::new();
+            for line in text.lines() {
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let (key, value) = line.split_once('=').expect("no key");
+                assert!(!key.is_empty());
+                assert!(sgr_only(value), "{key}: {value:?}");
+                found.push(key);
+            }
+            assert_eq!(found, KEYS);
+        }
+    }
+
+    /// Printables and SGR sequences only, which is what the prompt allows.
+    fn sgr_only(value: &str) -> bool {
+        let mut rest = value;
+        while let Some(i) = rest.find('\u{1b}') {
+            if rest[..i].chars().any(|c| c.is_control() || c == '\u{7f}') {
+                return false;
+            }
+            let Some(tail) = rest[i..].strip_prefix("\u{1b}[") else {
+                return false;
+            };
+            let Some(end) = tail.find(|c: char| !matches!(c, '0'..='9' | ';')) else {
+                return false;
+            };
+            if tail.as_bytes()[end] != b'm' {
+                return false;
+            }
+            rest = &tail[end + 1..];
+        }
+        !rest.chars().any(|c| c.is_control() || c == '\u{7f}')
     }
 
     #[test]
@@ -394,7 +531,7 @@ mod tests {
 
     #[test]
     fn the_encoded_command_only_uses_characters_no_shell_has_to_quote() {
-        let s = script(&Glyphs::pick(nerd), &palette());
+        let s = script(&Glyphs::pick(nerd), &palette(), None);
         let encoded = encoded_command(&s);
         assert!(
             encoded
@@ -408,6 +545,7 @@ mod tests {
 #[cfg(test)]
 mod diagnostics {
     use super::*;
+    use std::path::PathBuf;
 
     /// Writes the generated script out so it can be run for real:
     ///
@@ -417,6 +555,8 @@ mod diagnostics {
     /// ```
     ///
     /// `FOOTWIN_PROMPT_STYLE=inverse` dumps the other mapping.
+    /// `FOOTWIN_VALUES` is the chip file the dumped script will read, and
+    /// `FOOTWIN_DUMP_VALUES` a path to write that file's real contents to.
     ///
     /// Rust tests cannot tell whether the PowerShell inside is valid; the probe
     /// runs it under ConPTY and shows what the shell actually prints.
@@ -429,7 +569,11 @@ mod diagnostics {
             _ => config::ChipStyle::Surface,
         };
         let p = test_chip(style);
+        let values = std::env::var("FOOTWIN_VALUES").ok().map(PathBuf::from);
         let out = std::env::var("FOOTWIN_DUMP").expect("set FOOTWIN_DUMP to a path");
-        std::fs::write(out, script(&g, &p)).unwrap();
+        std::fs::write(out, script(&g, &p, values.as_deref())).unwrap();
+        if let Ok(out) = std::env::var("FOOTWIN_DUMP_VALUES") {
+            std::fs::write(out, values_file(&g, &p)).unwrap();
+        }
     }
 }

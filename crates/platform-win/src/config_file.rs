@@ -15,6 +15,7 @@ pub const ALPHA: u8 = 235;
 
 pub const USER_FILE: &str = "foothy.ini";
 pub const STATE_FILE: &str = "state.ini";
+pub const CHIP_FILE: &str = "chip.conf";
 
 pub struct Loaded {
     pub config: Config,
@@ -303,6 +304,28 @@ fn read_state_in(dir: &std::path::Path) -> std::io::Result<State> {
         theme: partial.settings.theme,
         prompt_style: partial.settings.prompt_style,
     })
+}
+
+pub fn chip_path() -> Option<PathBuf> {
+    dir().map(|d| d.join(CHIP_FILE))
+}
+
+/// The chip values a running prompt re-reads. Derived from state.ini, so a
+/// failed write costs the pane its new look, never a pick.
+pub fn save_chip_in(dir: &std::path::Path, text: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!("{CHIP_FILE}.{}.tmp", std::process::id()));
+    let out = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, dir.join(CHIP_FILE)));
+    if out.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    out
+}
+
+pub fn save_chip(text: &str) -> std::io::Result<()> {
+    let dir = dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "APPDATA is not set"))?;
+    save_chip_in(&dir, text)
 }
 
 pub fn save_state(state: &State, field: Field) -> std::io::Result<()> {
@@ -867,6 +890,24 @@ mod tests {
         }
         let empty = State::default();
         assert!(!empty.body().contains("theme"), "{}", empty.body());
+    }
+
+    #[test]
+    fn the_chip_file_is_replaced_whole_and_leaves_no_temp_behind() {
+        let dir = std::env::temp_dir().join("foothy-test-chip");
+        let _ = std::fs::remove_dir_all(&dir);
+        save_chip_in(&dir, "chevron=a\n").unwrap();
+        save_chip_in(&dir, "chevron=b\n").unwrap();
+        let text = std::fs::read_to_string(dir.join(CHIP_FILE)).unwrap();
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(text, "chevron=b\n");
+        assert!(left.is_empty(), "{left:?}");
     }
 
     #[test]
