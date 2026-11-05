@@ -186,7 +186,9 @@ cargo run -p vt-core --example prompt_probe -- p.ps1
 
 Precedence, lowest to highest: `defaults < theme < state.ini < foothy.ini < FOOTWIN_*`.
 
-**The app never writes `foothy.ini`.** Only `state.ini` is its own. A theme file may contribute colours and the light/dark variant, nothing else — it is text people copy from the internet.
+**The app never writes `foothy.ini`.** Its own files are `state.ini`, which records the user's picks, and `chip.conf`, derived from them so the PowerShell prompt can re-read its colours without knowing how they were computed.
+
+A theme file may contribute colours, the light/dark variant and `prompt-style`, nothing else — it is text people copy from the internet. `prompt-style` is on that list because the chip is part of a theme's look; every other key a theme file carries is dropped.
 
 Runtime tuning, no rebuild: `FOOTWIN_FONT`, `FOOTWIN_FONT_PX`, `FOOTWIN_PAD`, `FOOTWIN_FG`, `FOOTWIN_BG`, `FOOTWIN_ALPHA`, `FOOTWIN_BLINK`, `FOOTWIN_PASTE_WARN`, `FOOTWIN_PROMPT` (`0` keeps the shell's own prompt).
 
