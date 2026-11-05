@@ -338,6 +338,7 @@ mod tests {
         assert_eq!(c.alpha, 235);
         assert_eq!(c.blink, Blink::System);
         assert!(c.paste_warning);
+        assert!(c.prompt);
         assert_eq!(c.variant, Variant::Dark);
     }
 
@@ -442,17 +443,39 @@ mod tests {
         let read = only(USER_FILE, "theme=hostile\n");
         let theme = only(
             "hostile",
-            "[main]\ninitial-color-theme=light\npaste-warning=no\nfont=C:\\evil.ttf\nblink=1\nalpha=0\nfont-size=50\npad=40\ntheme=nord\n[colors-dark]\nbackground=111111\n[colors-light]\nbackground=eeeeee\n",
+            "[main]\ninitial-color-theme=light\npaste-warning=no\nprompt=no\nfont=C:\\evil.ttf\nblink=1\nalpha=0\nfont-size=50\npad=40\ntheme=nord\n[colors-dark]\nbackground=111111\n[colors-light]\nbackground=eeeeee\n",
         );
         let c = load(read, theme, none).config;
         assert_eq!(c.variant, Variant::Light);
         assert_eq!(c.colors.background, 0x00ee_eeee);
         assert!(c.paste_warning);
+        assert!(c.prompt);
         assert_eq!(c.font, None);
         assert_eq!(c.blink, Blink::System);
         assert_eq!(c.alpha, ALPHA);
         assert_eq!(c.font_size, FONT_PX);
         assert_eq!(c.pad, PAD);
+    }
+
+    #[test]
+    fn the_prompt_chip_is_on_unless_turned_off() {
+        assert!(load(none, none, none).config.prompt);
+        assert!(
+            !load(only(USER_FILE, "prompt=no\n"), none, none)
+                .config
+                .prompt
+        );
+        assert!(
+            load(only(USER_FILE, "prompt=yes\n"), none, none)
+                .config
+                .prompt
+        );
+    }
+
+    #[test]
+    fn footwin_prompt_zero_beats_the_user_file() {
+        let read = only(USER_FILE, "prompt=yes\n");
+        assert!(!load(read, none, only("FOOTWIN_PROMPT", "0")).config.prompt);
     }
 
     #[test]
