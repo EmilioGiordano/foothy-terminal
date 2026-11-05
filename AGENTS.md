@@ -6,7 +6,7 @@ The working agreement for this repository, and the guide to the code. Read it be
 
 A Rust workspace building a fast, light terminal emulator for Windows with multiplexing (splits), modelled on [foot](https://codeberg.org/dnkl/foot). It started as a research repo, so **`docs/` carries the reasoning and `upstream/` carries foot's real C source** (cloned, gitignored) as ground truth.
 
-When a claim about foot matters, read `upstream/foot/` rather than its documentation — the man page is stale in places (it still documents Solarized defaults while `config.c:33` ships `242424`, and it documents a `[colors]` section that no bundled theme uses).
+When a claim about foot matters, read `upstream/foot/` rather than its documentation — the man page is stale in places (it still documents Solarized defaults while `config.c:34` ships `242424`, and it documents a `[colors]` section that no bundled theme uses).
 
 `upstream/` is gitignored, so it does not exist in a worktree. From one, use the absolute path:
 
@@ -30,6 +30,7 @@ C:\Users\giord\Desktop\Code-Projects\foot-terminal\upstream\foot
 | Commit | yes |
 | Push | yes |
 | Open a PR | yes |
+| **Commit or push to `main` directly** | **never** |
 | **Merge to `main`** | **never** |
 | **Delete a branch, local or remote** | **never** |
 | **Delete a worktree** | **never** |
@@ -47,6 +48,8 @@ Stop, say what you would do and why, and wait:
 Everything else: decide, do it, and report the decision with its reason. Do not ask about things that have a sensible default.
 
 ## Branches
+
+**Work always happens on a branch.** If `main` is checked out, cut one before the first commit — `main` only ever moves through a merge Emilio does.
 
 English, descriptive, self-explanatory (`config-and-themes`, not `fase-0`). Cut from `main` unless stacking is deliberate — and stacking costs a rebase of the upper branch every time the lower one moves, so say why.
 
@@ -129,6 +132,8 @@ C:\Users\giord\Desktop\Code-Projects\foot-terminal-build\foot-win.exe
 
 `BUILD.txt` beside it records the branch, the commit and the time. Emilio tests in a real window and should not have to find the file.
 
+There is one path, so two agents building at once overwrite each other. Only the orchestrator ships the binary, and only when no other agent is building.
+
 ## Briefing an agent
 
 The brief is the only context it gets.
@@ -165,13 +170,13 @@ cargo run -p render --example coverage           # which glyphs the font has
 cargo run --release -p vt-core --example pane_cost -- 12   # the docs/02 §7 metric
 ```
 
-**Never `cargo run -p platform-win`** from an agent: it opens a window and steals focus.
+**Never run `foot-win`** from an agent: it opens a window and steals focus. `cargo run -p platform-win` with no `--bin` is `foot-win`, so always name the binary. `keytest` and `spike` are headless and fine.
 
 ## Configuration
 
 `%APPDATA%\foothy\foothy.ini`, in foot's ini format, with the 86 foot themes embedded in the binary and named rather than pathed.
 
-Precedence, lowest to highest: `defaults < state.ini < foothy.ini < FOOTWIN_*`.
+Precedence, lowest to highest: `defaults < theme < state.ini < foothy.ini < FOOTWIN_*`.
 
 **The app never writes `foothy.ini`.** Only `state.ini` is its own. A theme file may contribute colours and the light/dark variant, nothing else — it is text people copy from the internet.
 
@@ -190,17 +195,17 @@ This is the one thing to understand before changing anything.
 | `input` | 2.5 | Key → bytes, win32-input-mode, paste safety |
 | `platform-win` | 3 | winit, softbuffer, Win32 clipboard and window chrome |
 
-**Layers 1, 2 and 2.5 must build and test without opening a window.** No `winit`, no `windows-sys`, no pixels beyond a rectangle they were handed. This is what keeps a second platform additive instead of a rewrite, and why ~90% of the suite runs headless. If a change needs the OS down there, the design is wrong — push the platform part up to `platform-win` and pass values down.
+**Layers 1, 2 and 2.5 must build and test without opening a window.** No `winit`, no `windows-sys`, no pixels beyond a rectangle they were handed. This is what keeps a second platform additive instead of a rewrite. Two thirds of the suite lives in layers 1-2.5, and the whole suite runs without a window. If a change needs the OS down there, the design is wrong — push the platform part up to `platform-win` and pass values down.
 
 Check the rule in the **direct `[dependencies]` of each manifest**, not with `cargo tree`: `portable-pty` pulls `windows-sys` in transitively and that is fine.
 
-`config` and `layout` have an empty `[dependencies]` on purpose. There the rule is a compile error, not a convention.
+`config`, `layout` and `input` have an empty `[dependencies]` on purpose. There the rule is a compile error, not a convention.
 
 Three consequences worth knowing:
 
 - `layout` uses **geometry, not tree order**, for directional navigation: most overlap on the perpendicular axis, ties broken by distance. Its tests hold the cases that break naive implementations.
 - `vt-core` exposes a **read path** (`line_text`, `screen_text`, `is_selected`) on purpose. `docs/05` §3.1: a screen reader provider needs range-addressable reads, and retrofitting that is a refactor.
-- **Policy belongs in the lowest layer that can hold it.** `config::parse_theme` parses and filters in one call so a second platform cannot reach theme text without the filter.
+- **Policy belongs in the lowest layer that can hold it.** `config::parse_theme` parses and filters in one call, so the policy is written once in layer 2 instead of re-implemented per platform. `parse` is still public for user config files, so this narrows the mistake rather than making it impossible.
 
 `docs/02` §3 lists ten performance rules taken from foot's source. Load-bearing today: bounded work per event-loop turn, and idle costs 0% CPU — the PTY reader wakes the loop through an `EventLoopProxy` instead of polling, and the blink timer only arms while focused.
 
