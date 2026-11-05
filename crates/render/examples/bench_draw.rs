@@ -28,35 +28,28 @@ fn main() -> anyhow::Result<()> {
     let mut term = Terminal::new(size);
     for i in 0..size.screen_lines {
         term.feed(
-            format!("linea {i} con texto de relleno para llenar la fila entera\r\n").as_bytes(),
+            format!("line {i} with padding chars used to fill the complete row\r\n").as_bytes(),
         );
     }
 
     println!(
-        "grilla {}x{}  ({w}x{h} px)\n",
+        "grid {}x{}  ({w}x{h} px)\n",
         size.columns, size.screen_lines
     );
 
-    time("sin seleccion", &mut r, &term, &mut buf, w, h);
+    time("no selection", &mut r, &term, &mut buf, w, h);
 
     term.start_selection(0, 0, Side::Left, SelectionType::Simple);
     term.update_selection(size.screen_lines - 1, size.columns - 1, Side::Right);
-    time("seleccion Simple (pantalla)", &mut r, &term, &mut buf, w, h);
+    time("Simple selection (screen)", &mut r, &term, &mut buf, w, h);
 
     term.start_selection(0, 0, Side::Left, SelectionType::Semantic);
     term.update_selection(size.screen_lines - 1, size.columns - 1, Side::Right);
-    time(
-        "seleccion Semantic (palabra)",
-        &mut r,
-        &term,
-        &mut buf,
-        w,
-        h,
-    );
+    time("Semantic selection (word)", &mut r, &term, &mut buf, w, h);
 
     term.start_selection(0, 0, Side::Left, SelectionType::Lines);
     term.update_selection(size.screen_lines - 1, size.columns - 1, Side::Right);
-    time("seleccion Lines (linea)", &mut r, &term, &mut buf, w, h);
+    time("Lines selection (line)", &mut r, &term, &mut buf, w, h);
 
     Ok(())
 }
