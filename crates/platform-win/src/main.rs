@@ -72,11 +72,15 @@ fn chip_values(cfg: &config::Config, renderer: &Renderer) -> Option<String> {
     Some(prompt::values_file(&glyphs, &colors))
 }
 
-fn chip_failure(e: &std::io::Error) -> String {
-    format!(
-        "Could not write {}: {e}. The prompt chip keeps the colours it has.",
+// The palette clips a note to the overlay width, so the path and the error go
+// to stderr and the note stays short.
+const CHIP_NOTE: &str = "Could not save the prompt chip: it keeps the colours it has.";
+
+fn log_chip_failure(e: &std::io::Error) {
+    eprintln!(
+        "foothy: could not write {}: {e}",
         config_file::chip_path().display()
-    )
+    );
 }
 
 fn preview(text: &str) -> String {
@@ -346,7 +350,7 @@ impl App {
         panes.set_prompt(prompt_command(&cfg, &renderer));
         if let Some(e) = chip_values(&cfg, &renderer).and_then(|t| config_file::save_chip(&t).err())
         {
-            eprintln!("foothy: {}", chip_failure(&e));
+            log_chip_failure(&e);
         }
         Ok(Self {
             proxy,
@@ -885,10 +889,9 @@ impl App {
         match out {
             Ok(()) => false,
             Err(e) => {
-                let note = chip_failure(&e);
-                eprintln!("foothy: {note}");
+                log_chip_failure(&e);
                 if self.status.is_none() {
-                    self.status = Some(note);
+                    self.status = Some(CHIP_NOTE.to_string());
                 }
                 true
             }
