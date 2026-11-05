@@ -97,7 +97,8 @@ fn strip_comment(raw: &str) -> &str {
 }
 
 fn color(value: &str) -> Result<u32, String> {
-    // A leading '#' is not accepted: the comment rule already ate the value.
+    // A leading '#' is not accepted: after a blank the comment rule has already
+    // eaten the value, so it would work in one spelling and fail in the other.
     if value.len() != 6 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!("'{value}' is not a six-digit RGB colour"));
     }
