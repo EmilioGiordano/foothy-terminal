@@ -439,15 +439,16 @@ mod tests {
     }
 
     #[test]
-    fn a_theme_contributes_colours_and_the_variant_and_nothing_else() {
+    fn a_theme_contributes_colours_the_variant_and_the_chip_style_and_nothing_else() {
         let read = only(USER_FILE, "theme=hostile\n");
         let theme = only(
             "hostile",
-            "[main]\ninitial-color-theme=light\npaste-warning=no\nprompt=no\nfont=C:\\evil.ttf\nblink=1\nalpha=0\nfont-size=50\npad=40\ntheme=nord\n[colors-dark]\nbackground=111111\n[colors-light]\nbackground=eeeeee\n",
+            "[main]\ninitial-color-theme=light\nprompt-style=inverse\npaste-warning=no\nprompt=no\nfont=C:\\evil.ttf\nblink=1\nalpha=0\nfont-size=50\npad=40\ntheme=nord\n[colors-dark]\nbackground=111111\n[colors-light]\nbackground=eeeeee\n",
         );
         let c = load(read, theme, none).config;
         assert_eq!(c.variant, Variant::Light);
         assert_eq!(c.colors.background, 0x00ee_eeee);
+        assert_eq!(c.prompt_style, config::ChipStyle::Inverse);
         assert!(c.paste_warning);
         assert!(c.prompt);
         assert_eq!(c.font, None);
@@ -469,6 +470,33 @@ mod tests {
             load(only(USER_FILE, "prompt=yes\n"), none, none)
                 .config
                 .prompt
+        );
+    }
+
+    #[test]
+    fn the_chip_follows_the_surface_mapping_unless_asked_otherwise() {
+        assert_eq!(
+            load(none, none, none).config.prompt_style,
+            config::ChipStyle::Surface
+        );
+        assert_eq!(
+            load(only(USER_FILE, "prompt-style=inverse\n"), none, none)
+                .config
+                .prompt_style,
+            config::ChipStyle::Inverse
+        );
+    }
+
+    #[test]
+    fn the_user_file_beats_a_themes_chip_style() {
+        let read = only(USER_FILE, "theme=loud\nprompt-style=surface\n");
+        let theme = only(
+            "loud",
+            "[main]\nprompt-style=inverse\n[colors-dark]\nbackground=111111\n",
+        );
+        assert_eq!(
+            load(read, theme, none).config.prompt_style,
+            config::ChipStyle::Surface
         );
     }
 
