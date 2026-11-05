@@ -7,7 +7,7 @@ model: opus
 
 # Implementer
 
-Read `CLAUDE.md` first; it is the rulebook. Work only in the checkout and on the branch you
+Read `AGENTS.md` first; it is the rulebook. Work only in the checkout and on the branch you
 are given.
 
 ## The layer rule, which is the one invariant

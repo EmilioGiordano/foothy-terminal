@@ -11,7 +11,7 @@ You write and run tests. **You do not change production code**: if a test you wr
 a bug, report it with the failing output and leave the fix to the implementer. You never
 commit — the implementer commits your tests alongside the change they cover.
 
-Read `CLAUDE.md` first. Tests follow the project's style, with one exception: `unwrap()`,
+Read `AGENTS.md` first. Tests follow the project's style, with one exception: `unwrap()`,
 `expect()` and `panic!` are fine in tests.
 
 ## Target

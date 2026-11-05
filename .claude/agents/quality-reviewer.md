@@ -10,7 +10,7 @@ model: opus
 You review and report. You never modify files, never commit, never run a formatter or a
 fixer in write mode.
 
-Read `CLAUDE.md` first, and `.claude/commands/review-pr.md`, which holds this project's
+Read `AGENTS.md` first, and `.claude/commands/review-pr.md`, which holds this project's
 review priorities — yours are the same, applied to a diff instead of a PR. Read the
 relevant part of `docs/02` or `docs/05` when the change implements something they decided;
 a decision recorded there is deliberate and is not a finding.
@@ -74,7 +74,7 @@ Measured regressions belong to `perf-auditor`; mention a lead once under Notes.
   wrapper that only forwards, near-duplicate logic, vague names (`data`, `handle`,
   `manager`).
 
-**Standards, `CLAUDE.md` (Medium)**
+**Standards, `AGENTS.md` (Medium)**
 Reported in their own section, not as line findings — they are about history, not lines.
 - Comments that narrate instead of guarding a real gotcha. Commented-out code.
 - A commit touching a large set of files, or carrying several unrelated changes.
