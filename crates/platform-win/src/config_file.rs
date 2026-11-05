@@ -2,7 +2,10 @@
 
 use std::path::PathBuf;
 
-use config::{Blink, Config, Partial, PartialColors, Settings, Variant, bundled, merge, parse};
+use config::{
+    Blink, Config, Partial, PartialColors, Settings, Variant, bundled, into_variant, merge, parse,
+    parse_theme,
+};
 
 pub const FONT_PX: f32 = 16.0;
 // foot's own default is pad=0x0 (doc/foot.ini.5.scd).
@@ -86,11 +89,11 @@ pub fn load(
         }
         Some(name) => match user_theme(name).or_else(|| bundled(name).map(str::to_string)) {
             Some(text) => {
-                let (partial, found) = parse(&text);
+                let (partial, found) = parse_theme(&text);
                 for p in found {
                     problems.push(format!("theme {name}:{}: {}", p.line, p.message));
                 }
-                from_theme(partial)
+                partial
             }
             None => {
                 problems.push(format!("theme '{name}' not found"));
@@ -134,33 +137,6 @@ fn is_theme_name(name: &str) -> bool {
     }
     let stem = name.split('.').next().unwrap_or(name);
     !DEVICE_NAMES.iter().any(|d| stem.eq_ignore_ascii_case(d))
-}
-
-/// A theme may contribute colours and the variant, nothing else. Named field
-/// by field on purpose: blanking the forbidden ones would leak the next
-/// setting added to `Settings`, such as a `paste-warning=no` turning off the
-/// multiline-paste guard without telling the user.
-fn from_theme(theme: Partial) -> Partial {
-    Partial {
-        settings: Settings {
-            initial_variant: theme.settings.initial_variant,
-            ..Default::default()
-        },
-        dark: theme.dark,
-        light: theme.light,
-    }
-}
-
-fn into_variant(variant: Variant, colors: PartialColors, settings: Settings) -> Partial {
-    let (dark, light) = match variant {
-        Variant::Dark => (colors, PartialColors::default()),
-        Variant::Light => (PartialColors::default(), colors),
-    };
-    Partial {
-        settings,
-        dark,
-        light,
-    }
 }
 
 fn defaults(variant: Variant) -> Partial {
