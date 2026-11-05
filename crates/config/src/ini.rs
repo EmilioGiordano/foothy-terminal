@@ -1,8 +1,5 @@
 use crate::{Blink, CursorColors, Partial, PartialColors, Variant};
 
-/// A line that could not be used. Parsing never fails as a whole: foot skips
-/// the bad line and keeps the file (upstream/foot/config.c:3187), and one typo
-/// must not cost the user every other setting.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Problem {
     pub line: usize,
@@ -35,7 +32,6 @@ pub fn parse(text: &str) -> (Partial, Vec<Problem>) {
                 Some(name) => {
                     section = match name.trim() {
                         "main" => Section::Main,
-                        // [colors] and [colors2] are foot's deprecated names.
                         "colors-dark" | "colors" => Section::Dark,
                         "colors-light" | "colors2" => Section::Light,
                         _ => Section::Other,
@@ -43,8 +39,7 @@ pub fn parse(text: &str) -> (Partial, Vec<Problem>) {
                 }
                 None => {
                     // A rejected header must not leave the previous section in
-                    // force, or its keys land in the wrong one
-                    // (upstream/foot/config.c:3257-3269).
+                    // force, or its keys land in the wrong one.
                     section = Section::Other;
                     problems.push(Problem {
                         line,
@@ -86,8 +81,7 @@ pub fn parse(text: &str) -> (Partial, Vec<Problem>) {
     (out, problems)
 }
 
-/// foot only ends a value at a `#` preceded by blank space
-/// (upstream/foot/config.c:3236), which keeps a `#` inside a path or a name.
+/// A value ends at a `#` preceded by blank space, not at the first `#`.
 fn strip_comment(raw: &str) -> &str {
     let line = raw.trim_start();
     if line.starts_with('#') {
@@ -103,9 +97,7 @@ fn strip_comment(raw: &str) -> &str {
 }
 
 fn color(value: &str) -> Result<u32, String> {
-    // Six hex digits and nothing else, as foot (upstream/foot/config.c:702). A
-    // leading '#' cannot be accepted: with a space before it, the comment rule
-    // has already eaten the value.
+    // A leading '#' is not accepted: the comment rule already ate the value.
     if value.len() != 6 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!("'{value}' is not a six-digit RGB colour"));
     }
@@ -121,7 +113,6 @@ fn two_colors(value: &str) -> Result<(u32, u32), String> {
 }
 
 fn boolean(value: &str) -> Result<bool, String> {
-    // foot's vocabulary, upstream/foot/config.c:489.
     match value.to_ascii_lowercase().as_str() {
         "on" | "true" | "yes" | "1" => Ok(true),
         "off" | "false" | "no" | "0" => Ok(false),
@@ -129,8 +120,7 @@ fn boolean(value: &str) -> Result<bool, String> {
     }
 }
 
-/// foot writes alpha as a 0.0-1.0 fraction; our `FOOTWIN_ALPHA` is a 0-255
-/// byte. `1` has to mean opaque, so anything up to 1 is read as a fraction.
+/// `1` means opaque: up to 1 the value is a fraction, above it a 0-255 byte.
 fn alpha(value: &str) -> Result<u8, String> {
     let f: f32 = value
         .parse()
@@ -156,8 +146,7 @@ fn main_key(out: &mut Partial, key: &str, value: &str) -> Result<(), String> {
                     .map_err(|_| format!("font-size '{value}' is not a number"))?,
             )
         }
-        // foot writes `pad=2x2 center`; we have one padding, so the first
-        // number is it.
+        // The file writes `pad=2x2 center`; the first number is the one we use.
         "pad" => {
             let first = value
                 .split_whitespace()
@@ -203,7 +192,7 @@ fn main_key(out: &mut Partial, key: &str, value: &str) -> Result<(), String> {
 }
 
 fn colors_key(out: &mut Partial, variant: Variant, key: &str, value: &str) -> Result<(), String> {
-    // foot accepts alpha inside the colour sections, not in [main].
+    // The colour sections carry alpha too, not only [main].
     if key == "alpha" {
         out.settings.alpha = Some(alpha(value)?);
         return Ok(());
@@ -238,9 +227,8 @@ fn colors_key(out: &mut Partial, variant: Variant, key: &str, value: &str) -> Re
             if let Some(slot) = indexed(key, "regular", 0).or_else(|| indexed(key, "bright", 8)) {
                 c.palette[slot] = Some(color(value)?);
             }
-            // Everything else is a foot feature we do not have (dim0-7,
-            // flash, urls, search-box-*, jump-labels, sixel*). Ignoring them
-            // is required: every bundled theme carries some.
+            // An unknown key is not an error: every bundled theme carries
+            // foot features we lack.
         }
     }
     Ok(())
