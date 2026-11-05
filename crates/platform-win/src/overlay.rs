@@ -110,6 +110,40 @@ pub fn layout(
     })
 }
 
+/// The label is what a row is; the tag only repeats a shortcut. A box too
+/// narrow for both keeps this many cells for the label, clips the tag and
+/// drops the swatch.
+const MIN_LABEL_COLS: usize = 8;
+
+/// Cells from the left of the list, the one-cell indent included.
+#[derive(Debug)]
+struct RowSpans {
+    label: (usize, usize),
+    swatch: Option<usize>,
+    tag: (usize, usize),
+}
+
+fn row_spans(list_cols: usize, tag_len: usize, swatch: bool) -> RowSpans {
+    let label_col = 1;
+    let min_end = label_col + MIN_LABEL_COLS;
+    // One cell between the label and the tag, or a clipped label would run
+    // straight into the shortcut.
+    let tag_cols = tag_len.min(list_cols.saturating_sub(min_end + 1));
+    let tag_col = list_cols - tag_cols;
+    let mut label_end = tag_col.saturating_sub(1);
+    let swatch_col = if swatch && label_end >= min_end + SWATCH {
+        label_end -= SWATCH;
+        Some(label_end)
+    } else {
+        None
+    };
+    RowSpans {
+        label: (label_col, label_end.saturating_sub(label_col)),
+        swatch: swatch_col,
+        tag: (tag_col, tag_cols),
+    }
+}
+
 struct Look {
     bg: u32,
     fg: u32,
@@ -214,26 +248,25 @@ pub fn draw(
             r.fill_area(buf, w, h, (text_x, y, list_cols * cw, ch), bg);
         }
 
-        let tag_cols = row.tag.chars().count();
-        let tag_x = text_x + list_cols.saturating_sub(tag_cols) * cw;
-        let mut label_end = tag_x;
+        let spans = row_spans(list_cols, row.tag.chars().count(), row.theme.is_some());
 
-        if let Some(i) = row.theme {
-            let swatch_x = tag_x.saturating_sub((SWATCH + 1) * cw);
+        if let (Some(i), Some(col)) = (row.theme, spans.swatch) {
             for (k, color) in list.swatches[i].iter().enumerate() {
                 r.fill_area(
                     buf,
                     w,
                     h,
-                    (swatch_x + k * cw, y + 1, cw, ch.saturating_sub(2)),
+                    (text_x + (col + k) * cw, y + 1, cw, ch.saturating_sub(2)),
                     *color,
                 );
             }
-            label_end = swatch_x;
         }
 
-        let label_w = label_end.saturating_sub(text_x + cw);
-        r.draw_text(buf, w, h, text_x + cw, y, label_w, row.label, fg, bg);
+        let (label_col, label_cols) = spans.label;
+        let (tag_col, tag_cols) = spans.tag;
+        let label_x = text_x + label_col * cw;
+        r.draw_text(buf, w, h, label_x, y, label_cols * cw, row.label, fg, bg);
+        let tag_x = text_x + tag_col * cw;
         r.draw_text(buf, w, h, tag_x, y, tag_cols * cw, row.tag, fg, bg);
     }
 
@@ -297,6 +330,54 @@ mod tests {
     fn a_short_list_shrinks_the_box_instead_of_leaving_holes() {
         let l = layout((1200, 800), (9, 19), 0, 3).unwrap();
         assert_eq!(l.rows, 3);
+    }
+
+    fn every_tag() -> Vec<String> {
+        let p = Palette::commands(Vec::new(), None);
+        let mut tags: Vec<String> = p.visible(50).iter().map(|r| r.tag.to_string()).collect();
+        tags.push("dark".to_string());
+        tags.push("light".to_string());
+        tags
+    }
+
+    /// At the narrowest admitted width the longest tag is wider than the list,
+    /// and a right-aligned tag used to take the whole row.
+    #[test]
+    fn the_narrowest_admitted_box_still_shows_a_label() {
+        let cw = 9;
+        let narrowest = (1..400usize)
+            .map(|cells| cells * cw)
+            .find(|&w| layout((w, 800), (cw, 19), 0, 60).is_some())
+            .expect("no width is admitted");
+        for extra in 0..2 {
+            let l = layout((narrowest + extra * cw, 800), (cw, 19), 0, 60).unwrap();
+            let list_cols = l.cols - 2;
+            for tag in every_tag() {
+                for swatch in [false, true] {
+                    let s = row_spans(list_cols, tag.chars().count(), swatch);
+                    let (label_col, label_cols) = s.label;
+                    let (tag_col, tag_cols) = s.tag;
+                    let case = format!("cols {} tag {tag} swatch {swatch}: {s:?}", l.cols);
+                    assert!(label_cols >= MIN_LABEL_COLS, "{case}");
+                    assert!(label_col + label_cols < tag_col, "{case}");
+                    assert!(tag_col + tag_cols <= list_cols, "{case}");
+                    if let Some(col) = s.swatch {
+                        assert!(col >= label_col + label_cols, "{case}");
+                        assert!(col + SWATCH < tag_col, "{case}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_wide_box_shows_every_tag_whole_and_every_swatch() {
+        let l = layout((1200, 800), (9, 19), 0, 60).unwrap();
+        for tag in every_tag() {
+            let s = row_spans(l.cols - 2, tag.chars().count(), true);
+            assert_eq!(s.tag.1, tag.chars().count(), "{tag}");
+            assert!(s.swatch.is_some(), "{tag}");
+        }
     }
 
     #[test]
