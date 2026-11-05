@@ -141,8 +141,8 @@ pub fn merge(base: Partial, over: Partial) -> Partial {
     }
 }
 
-/// The only way to read theme text: parsing and filtering in one call, so no
-/// caller can parse a theme and forget the filter.
+/// Theme text goes through this and never through bare `parse`: it filters in
+/// the same call, so no caller can parse a theme and forget the filter.
 pub fn parse_theme(text: &str) -> (Partial, Vec<Problem>) {
     let (partial, problems) = parse(text);
     (from_theme(partial), problems)
