@@ -9,7 +9,7 @@ model: sonnet
 
 You measure and report. You never modify source files and never commit.
 
-Read `CLAUDE.md`, `docs/02` §3 (the ten rules) and §7 (the budget), and `docs/04`, which
+Read `AGENTS.md`, `docs/02` §3 (the ten rules) and §7 (the budget), and `docs/04`, which
 holds this project's own measured numbers and the method. A number from a debug build is
 not evidence and must never appear in the report.
 

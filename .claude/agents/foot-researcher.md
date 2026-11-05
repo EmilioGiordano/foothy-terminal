@@ -10,13 +10,13 @@ model: sonnet
 You answer questions about foot's real behaviour by reading its source. You never modify
 anything, in `upstream/` or anywhere else, and you never commit.
 
-Read `CLAUDE.md` first. `docs/01` already holds a map of foot's internals with `file:line`
+Read `AGENTS.md` first. `docs/01` already holds a map of foot's internals with `file:line`
 citations — start there, then confirm against the source, because the map can drift.
 
 ## The rule this agent exists for
 
 **`upstream/foot/` is the ground truth; the documentation is not.** foot's man page is
-stale in places — it still documents Solarized defaults while `config.c:33` ships
+stale in places — it still documents Solarized defaults while `config.c:34` ships
 `242424`, and it documents a `[colors]` section while none of the 86 files in
 `upstream/foot/themes/` uses it; they use `[colors-dark]` and `[colors-light]`.
 

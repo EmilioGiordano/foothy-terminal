@@ -33,7 +33,7 @@ Every `unsafe` block must be justified by the surrounding code. Check handle and
 **5. Tests.**
 New logic in layers 1–2.5 should be testable without a window, and usually is. Flag behaviour that could have had a headless test and did not get one, and tests that assert an implementation detail rather than the behaviour a user would notice.
 
-**6. Project standards** (`CLAUDE.md`).
+**6. Project standards** (`AGENTS.md`).
 Three of these are not visible in the diff, so look them up: run `gh pr view --json headRefName,commits` or `git log --oneline main..HEAD` before judging them.
 
 - *Comments*: only for a rule that is important and not already obvious from the code — something whose removal would let someone reintroduce a bug. English, brief. Flag narration, commented-out code, and comments that restate the line below them.
