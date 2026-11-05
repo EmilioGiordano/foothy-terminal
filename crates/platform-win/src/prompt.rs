@@ -142,7 +142,9 @@ function global:__footChipRead {
   } catch { return $null }
   # The app may be renaming over this file while it is read, so a file that
   # does not end on a newline is a half-written one and gets no say.
-  if (-not $t.EndsWith("`n")) { return $null }
+  # Ordinal: the default EndsWith is culture-sensitive and takes a newline
+  # followed by an ignorable character as a newline.
+  if (-not $t.EndsWith("`n", [System.StringComparison]::Ordinal)) { return $null }
   $h = @{}
   # foreach, not ForEach-Object: 'return' inside a pipeline block leaves only
   # the block, and a rejected line would then be skipped instead of fatal.
