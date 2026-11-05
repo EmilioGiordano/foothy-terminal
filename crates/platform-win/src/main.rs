@@ -76,6 +76,13 @@ fn chip_values(cfg: &config::Config, renderer: &Renderer) -> Option<String> {
 // to stderr and the note stays short.
 const CHIP_NOTE: &str = "Could not save the prompt chip: it keeps the colours it has.";
 
+fn state_note() -> String {
+    format!(
+        "Could not save {}: the pick applies to this session only.",
+        config_file::STATE_FILE
+    )
+}
+
 fn log_chip_failure(e: &std::io::Error) {
     eprintln!(
         "foothy: could not write {}: {e}",
@@ -906,10 +913,7 @@ impl App {
             }
             Err(e) => {
                 eprintln!("foothy: could not write {}: {e}", config_file::STATE_FILE);
-                self.status = Some(format!(
-                    "Could not save {}: the pick applies to this session only.",
-                    config_file::STATE_FILE
-                ));
+                self.status = Some(state_note());
                 true
             }
         }
