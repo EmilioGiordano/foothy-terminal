@@ -258,7 +258,7 @@ mod tests {
         let pty = Pty::spawn(cmd, size).expect("spawn");
         assert!(
             run_until_exit(pty, size).is_some(),
-            "el hijo termino pero child_exited() nunca lo reporto"
+            "the child exited but child_exited() never reported it"
         );
     }
 
@@ -278,10 +278,13 @@ mod tests {
         )
         .expect("spawn");
 
-        assert!(run_until_exit(pty, size).is_some(), "no reporto la salida");
+        assert!(
+            run_until_exit(pty, size).is_some(),
+            "the exit went unreported"
+        );
         assert!(
             woke.load(Ordering::SeqCst),
-            "la salida no desperto el bucle de eventos"
+            "the exit did not wake the event loop"
         );
     }
 }

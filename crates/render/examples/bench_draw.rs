@@ -16,9 +16,44 @@ fn time(label: &str, r: &mut Renderer, term: &Terminal, buf: &mut [u32], w: usiz
     println!("{label:<34} {per:>7.2} ms/frame");
 }
 
+/// The xterm cube and ramp. An example supplies its own rather than `render`
+/// taking a dependency on `config` for it.
+fn palette() -> [u32; 256] {
+    const ANSI16: [u32; 16] = [
+        0x0000_0000,
+        0x00aa_0000,
+        0x0000_aa00,
+        0x00aa_5500,
+        0x0000_00aa,
+        0x00aa_00aa,
+        0x0000_aaaa,
+        0x00aa_aaaa,
+        0x0055_5555,
+        0x00ff_5555,
+        0x0055_ff55,
+        0x00ff_ff55,
+        0x0055_55ff,
+        0x00ff_55ff,
+        0x0055_ffff,
+        0x00ff_ffff,
+    ];
+    const STEPS: [u32; 6] = [0, 95, 135, 175, 215, 255];
+    std::array::from_fn(|i| match i {
+        0..=15 => ANSI16[i],
+        16..=231 => {
+            let c = i - 16;
+            (STEPS[c / 36] << 16) | (STEPS[(c / 6) % 6] << 8) | STEPS[c % 6]
+        }
+        _ => {
+            let v = 8 + (i - 232) as u32 * 10;
+            (v << 16) | (v << 8) | v
+        }
+    })
+}
+
 fn main() -> anyhow::Result<()> {
     let bytes = std::fs::read(r"C:\Windows\Fonts\CascadiaMono.ttf")?;
-    let mut r = Renderer::new(&bytes, 16.0)?;
+    let mut r = Renderer::new(&bytes, 16.0, &palette())?;
     let (cw, ch) = r.cell_size();
 
     let size = TermSize::new(200, 50);
@@ -28,35 +63,28 @@ fn main() -> anyhow::Result<()> {
     let mut term = Terminal::new(size);
     for i in 0..size.screen_lines {
         term.feed(
-            format!("linea {i} con texto de relleno para llenar la fila entera\r\n").as_bytes(),
+            format!("line {i} with padding chars used to fill the complete row\r\n").as_bytes(),
         );
     }
 
     println!(
-        "grilla {}x{}  ({w}x{h} px)\n",
+        "grid {}x{}  ({w}x{h} px)\n",
         size.columns, size.screen_lines
     );
 
-    time("sin seleccion", &mut r, &term, &mut buf, w, h);
+    time("no selection", &mut r, &term, &mut buf, w, h);
 
     term.start_selection(0, 0, Side::Left, SelectionType::Simple);
     term.update_selection(size.screen_lines - 1, size.columns - 1, Side::Right);
-    time("seleccion Simple (pantalla)", &mut r, &term, &mut buf, w, h);
+    time("Simple selection (screen)", &mut r, &term, &mut buf, w, h);
 
     term.start_selection(0, 0, Side::Left, SelectionType::Semantic);
     term.update_selection(size.screen_lines - 1, size.columns - 1, Side::Right);
-    time(
-        "seleccion Semantic (palabra)",
-        &mut r,
-        &term,
-        &mut buf,
-        w,
-        h,
-    );
+    time("Semantic selection (word)", &mut r, &term, &mut buf, w, h);
 
     term.start_selection(0, 0, Side::Left, SelectionType::Lines);
     term.update_selection(size.screen_lines - 1, size.columns - 1, Side::Right);
-    time("seleccion Lines (linea)", &mut r, &term, &mut buf, w, h);
+    time("Lines selection (line)", &mut r, &term, &mut buf, w, h);
 
     Ok(())
 }

@@ -105,11 +105,11 @@ mod tests {
     fn round_trip_preserves_text() {
         let previous = get_text();
 
-        let sample = "hola mundo\nsegunda línea\ttab · 中文 · 😀";
-        assert!(set_text(sample), "no se pudo escribir al portapapeles");
+        let sample = "hello world\nsecond line\ttab · 中文 · 😀";
+        assert!(set_text(sample), "could not write to the clipboard");
         assert_eq!(get_text().as_deref(), Some(sample));
 
-        assert!(set_text(""), "texto vacio");
+        assert!(set_text(""), "empty text");
         assert_eq!(get_text().as_deref(), Some(""));
 
         if let Some(previous) = previous {

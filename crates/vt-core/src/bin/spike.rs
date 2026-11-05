@@ -47,11 +47,11 @@ fn main() -> anyhow::Result<()> {
                     term.feed(&rest);
                 }
             }
-            eprintln!("(hijo terminó: {status:?})");
+            eprintln!("(child exited: {status:?})");
             break;
         }
         if Instant::now() > deadline {
-            eprintln!("(timeout: el hijo no cerró en 10 s)");
+            eprintln!("(timeout: the child did not exit within 10 s)");
             break;
         }
         std::thread::sleep(Duration::from_millis(2));
@@ -61,7 +61,7 @@ fn main() -> anyhow::Result<()> {
 
     println!("--- grid ({}x{}) ---", size.columns, size.screen_lines);
     println!("{}", term.screen_text());
-    println!("--- fin ---");
+    println!("--- end ---");
 
     let (row, col) = term.cursor();
     eprintln!(

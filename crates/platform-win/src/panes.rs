@@ -107,7 +107,7 @@ impl Panes {
         let pty = match Pty::spawn_with_waker(cmd, size, waker) {
             Ok(pty) => Some(pty),
             Err(e) => {
-                eprintln!("no se pudo abrir el PTY: {e}");
+                eprintln!("could not open the PTY: {e}");
                 None
             }
         };

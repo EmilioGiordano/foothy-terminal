@@ -264,6 +264,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "config"
+version = "0.0.0"
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1229,6 +1233,7 @@ name = "platform-win"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "config",
  "input",
  "layout",
  "portable-pty",

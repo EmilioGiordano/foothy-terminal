@@ -1,0 +1,4 @@
+# foot's theme catalogue, copied verbatim. Marking it vendored collapses it in
+# GitHub diffs and keeps it out of the language stats, so a review sees the code.
+crates/config/themes/** linguist-vendored
+crates/config/themes/** -diff
