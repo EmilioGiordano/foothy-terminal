@@ -676,8 +676,6 @@ impl App {
         self.cfg = cfg;
     }
 
-    /// Clearing `shown` is part of it: left set, re-entering the theme list on
-    /// the same index would be taken for a repeat and skip the repaint.
     fn show_style(&mut self, style: config::ChipStyle) {
         let mut cfg = self.cfg.clone();
         cfg.prompt_style = style;
@@ -685,6 +683,8 @@ impl App {
         self.cfg = cfg;
     }
 
+    /// `shown` has to be cleared here: left set, re-entering the theme list on
+    /// the same index would be taken for a repeat and skip the repaint.
     fn restore_look(&mut self) {
         let Some(open) = self.open.as_mut() else {
             return;

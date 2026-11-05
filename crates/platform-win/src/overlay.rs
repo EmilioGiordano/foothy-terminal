@@ -398,7 +398,6 @@ mod tests {
         assert!(footer(Mode::Styles).contains("new panes"));
     }
 
-    /// The prompt is the only thing on screen that says which list is open.
     #[test]
     fn every_mode_has_its_own_prompt() {
         let mut seen: Vec<&str> = MODES.iter().map(|m| prompt(*m)).collect();
