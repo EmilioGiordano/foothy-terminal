@@ -46,14 +46,20 @@ const PREVIEW_FADE: Duration = Duration::from_millis(90);
 const PREVIEW_GLIDE: Duration = Duration::from_millis(90);
 const PREVIEW_FRAME: Duration = Duration::from_millis(8);
 const CLOSE_HOVER: u32 = 0x00b3_4a4a;
-const PROMPT_PILL: u32 = 0x000e_1418;
-const PROMPT_FOLDER: u32 = 0x005f_b3a1;
-const PROMPT_PATH: u32 = 0x00dc_ecf5;
-const PROMPT_BRANCH_ICON: u32 = 0x009d_7cd8;
-const PROMPT_BRANCH: u32 = 0x00e8_eef5;
 /// Picked at runtime: a font without the glyph draws tofu instead.
 const CLOSE_GLYPHS: [char; 4] = ['×', '╳', '⨯', 'x'];
 const FOCUS_GLYPHS: [char; 3] = ['▍', '▌', '|'];
+
+/// The chip's colours are truecolor computed here, not palette indices the
+/// renderer could re-resolve, so this has to run again whenever the theme does.
+fn prompt_command(cfg: &config::Config, renderer: &Renderer) -> Option<String> {
+    if !cfg.prompt {
+        return None;
+    }
+    let glyphs = prompt::Glyphs::pick(|c| renderer.has_glyph(c));
+    let colors = config::chip_colors(&cfg.colors, cfg.prompt_style);
+    Some(prompt::encoded_command(&prompt::script(&glyphs, &colors)))
+}
 
 fn preview(text: &str) -> String {
     let first = text.lines().next().unwrap_or("").trim();
@@ -316,19 +322,7 @@ impl App {
         let focus_glyph = pick(&FOCUS_GLYPHS, '|');
 
         let mut panes = Panes::new(header_h, cell_w);
-        if cfg.prompt {
-            let glyphs = prompt::Glyphs::pick(|c| renderer.has_glyph(c));
-            let palette = prompt::Palette {
-                pill: PROMPT_PILL,
-                folder_icon: PROMPT_FOLDER,
-                path: PROMPT_PATH,
-                branch_icon: PROMPT_BRANCH_ICON,
-                branch: PROMPT_BRANCH,
-                chevron: PROMPT_FOLDER,
-            };
-            let script = prompt::script(&glyphs, &palette);
-            panes.set_prompt(Some(prompt::encoded_command(&script)));
-        }
+        panes.set_prompt(prompt_command(&cfg, &renderer));
         Ok(Self {
             proxy,
             window: None,
@@ -662,6 +656,9 @@ impl App {
         self.renderer
             .set_colors(cfg.colors.foreground, cfg.colors.background);
         self.renderer.set_palette(&cfg.colors.palette);
+        // The chip is printed, not drawn, so its colours freeze into the
+        // scrollback: only a pane opened after this sees the new theme.
+        self.panes.set_prompt(prompt_command(cfg, &self.renderer));
         if self.hwnd != 0 {
             chrome::set_dark_titlebar(self.hwnd as _, cfg.variant == config::Variant::Dark);
         }

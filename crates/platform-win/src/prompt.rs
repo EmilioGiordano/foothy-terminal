@@ -4,16 +4,7 @@
 //! prompt on the shell's side of the line, so what we own here is the script and
 //! the glyphs it is allowed to use.
 
-/// Colours the chip is painted with, as `0x00RRGGBB`. Icons carry their own,
-/// which is what separates the chip from a plain coloured run of text.
-pub struct Palette {
-    pub pill: u32,
-    pub folder_icon: u32,
-    pub path: u32,
-    pub branch_icon: u32,
-    pub branch: u32,
-    pub chevron: u32,
-}
+use config::{ChipColors, Pill};
 
 /// Glyphs the chip is drawn with.
 pub struct Glyphs {
@@ -77,28 +68,48 @@ fn rgb(color: u32) -> String {
     )
 }
 
-/// Opens a pill: the left cap drawn in the pill colour over the terminal
-/// background, then the fill, the icon in its own colour, then the text colour.
-fn pill_open(g: &Glyphs, pill: u32, icon: Option<char>, ink: u32, text: u32) -> String {
-    let mut s = format!(
-        "${{e}}[0m${{e}}[38;2;{}m{}${{e}}[48;2;{}m ",
-        rgb(pill),
-        g.pill_left,
-        rgb(pill)
-    );
-    if let Some(icon) = icon {
-        s.push_str(&format!("${{e}}[38;2;{}m{icon} ", rgb(ink)));
+fn ink(color: u32) -> String {
+    format!("${{e}}[38;2;{}m", rgb(color))
+}
+
+/// Opens a pill: the left cap over the terminal background, then the fill, the
+/// icon, then the text colour. Under `Pill::Reverse` the cap is printed before
+/// `[7m`, or the swap would paint the cap's own shape in the background colour.
+fn pill_open(
+    g: &Glyphs,
+    pill: Pill,
+    icon: Option<char>,
+    icon_ink: Option<u32>,
+    text: Option<u32>,
+) -> String {
+    let mut s = String::from("${e}[0m");
+    match pill {
+        Pill::Fill(c) => s.push_str(&format!(
+            "{}{}${{e}}[48;2;{}m ",
+            ink(c),
+            g.pill_left,
+            rgb(c)
+        )),
+        Pill::Reverse => s.push_str(&format!("{}${{e}}[7m ", g.pill_left)),
     }
-    s.push_str(&format!("${{e}}[38;2;{}m", rgb(text)));
+    if let Some(icon) = icon {
+        if let Some(c) = icon_ink {
+            s.push_str(&ink(c));
+        }
+        s.push_str(&format!("{icon} "));
+    }
+    if let Some(c) = text {
+        s.push_str(&ink(c));
+    }
     s
 }
 
-fn pill_close(g: &Glyphs, pill: u32) -> String {
-    format!(
-        " ${{e}}[0m${{e}}[38;2;{}m{}${{e}}[0m",
-        rgb(pill),
-        g.pill_right
-    )
+fn pill_close(g: &Glyphs, pill: Pill) -> String {
+    let cap = match pill {
+        Pill::Fill(c) => format!("{}{}", ink(c), g.pill_right),
+        Pill::Reverse => g.pill_right.to_string(),
+    };
+    format!(" ${{e}}[0m{cap}${{e}}[0m")
 }
 
 // .NET rather than cmdlets throughout: this runs before every command, and
@@ -178,7 +189,7 @@ function global:prompt {
 "#;
 
 /// The PowerShell that replaces the stock `PS C:\...>` prompt.
-pub fn script(g: &Glyphs, p: &Palette) -> String {
+pub fn script(g: &Glyphs, p: &ChipColors) -> String {
     TEMPLATE
         .replace(
             "@PATH_ON@",
@@ -192,7 +203,7 @@ pub fn script(g: &Glyphs, p: &Palette) -> String {
         .replace("@BRANCH_OFF@", &pill_close(g, p.pill))
         .replace(
             "@CHEVRON@",
-            &format!("${{e}}[38;2;{}m{}${{e}}[0m", rgb(p.chevron), g.chevron),
+            &format!("{}{}${{e}}[0m", ink(p.chevron), g.chevron),
         )
         .replace("@ELL@", &g.ellipsis.to_string())
 }
@@ -234,8 +245,24 @@ pub fn encoded_command(script: &str) -> String {
 }
 
 #[cfg(test)]
+fn test_colors() -> config::Colors {
+    let mut c = config::Config::default().colors;
+    c.foreground = 0x00dc_ecf5;
+    c.background = 0x0016_2a33;
+    c.palette[5] = 0x009d_7cd8;
+    c.palette[6] = 0x005f_b3a1;
+    c
+}
+
+#[cfg(test)]
+fn test_chip(style: config::ChipStyle) -> ChipColors {
+    config::chip_colors(&test_colors(), style)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use config::ChipStyle;
 
     fn nerd(_: char) -> bool {
         true
@@ -245,15 +272,8 @@ mod tests {
         !CASCADIA_LACKS.contains(&c)
     }
 
-    fn palette() -> Palette {
-        Palette {
-            pill: 0x000e_1418,
-            folder_icon: 0x005f_b3a1,
-            path: 0x00dc_ecf5,
-            branch_icon: 0x009d_7cd8,
-            branch: 0x00e8_eef5,
-            chevron: 0x005f_b3a1,
-        }
+    fn palette() -> ChipColors {
+        test_chip(ChipStyle::Surface)
     }
 
     #[test]
@@ -295,23 +315,45 @@ mod tests {
 
     #[test]
     fn every_placeholder_is_filled_in() {
-        let s = script(&Glyphs::pick(cascadia), &palette());
-        assert!(!s.contains('@'), "a placeholder survived:\n{s}");
+        for style in [ChipStyle::Surface, ChipStyle::Inverse] {
+            let s = script(&Glyphs::pick(cascadia), &test_chip(style));
+            assert!(!s.contains('@'), "a placeholder survived:\n{s}");
+        }
     }
 
     #[test]
     fn the_escape_is_written_so_powershell_cannot_read_it_as_an_index() {
         // "$e[38;..." would be parsed as indexing $e; "${e}[38;..." cannot be.
-        let s = script(&Glyphs::pick(cascadia), &palette());
-        assert!(s.contains("${e}[38;2;"));
-        assert!(!s.contains("$e[38;2;"));
+        for style in [ChipStyle::Surface, ChipStyle::Inverse] {
+            let s = script(&Glyphs::pick(cascadia), &test_chip(style));
+            assert!(s.contains("${e}["));
+            assert!(!s.contains("$e["));
+        }
     }
 
     #[test]
-    fn the_colours_come_out_as_decimal_channels() {
+    fn surface_comes_out_as_decimal_channels() {
         let s = script(&Glyphs::pick(cascadia), &palette());
         assert!(s.contains("38;2;220;236;245"), "path colour missing");
-        assert!(s.contains("48;2;14;20;24"), "pill fill missing");
+        assert!(s.contains("48;2;50;69;78"), "pill fill missing");
+    }
+
+    #[test]
+    fn inverse_paints_the_pill_with_the_reverse_attribute() {
+        let s = script(&Glyphs::pick(cascadia), &test_chip(ChipStyle::Inverse));
+        assert!(s.contains("${e}[7m"), "the reverse pill is missing");
+        assert!(!s.contains("48;2;"), "inverse must not name a background");
+        assert!(s.contains("38;2;95;179;161"), "chevron colour missing");
+    }
+
+    #[test]
+    fn the_reverse_cap_is_printed_before_the_swap() {
+        // Inside [7m the cap glyph is drawn in the background colour, which
+        // hollows the rounded end out instead of filling it.
+        let g = Glyphs::pick(cascadia);
+        let s = script(&g, &test_chip(ChipStyle::Inverse));
+        let open = format!("${{e}}[0m{}${{e}}[7m", g.pill_left);
+        assert!(s.contains(&open), "the cap is inside the reverse:\n{s}");
     }
 
     #[test]
@@ -356,20 +398,19 @@ mod diagnostics {
     /// cargo run -p vt-core --example prompt_probe -- /tmp/p.ps1
     /// ```
     ///
+    /// `FOOTWIN_PROMPT_STYLE=inverse` dumps the other mapping.
+    ///
     /// Rust tests cannot tell whether the PowerShell inside is valid; the probe
     /// runs it under ConPTY and shows what the shell actually prints.
     #[test]
     #[ignore]
     fn dump_the_script() {
         let g = Glyphs::pick(|c| !CASCADIA_LACKS.contains(&c));
-        let p = Palette {
-            pill: 0x000e_1418,
-            folder_icon: 0x005f_b3a1,
-            path: 0x00dc_ecf5,
-            branch_icon: 0x009d_7cd8,
-            branch: 0x00e8_eef5,
-            chevron: 0x005f_b3a1,
+        let style = match std::env::var("FOOTWIN_PROMPT_STYLE").as_deref() {
+            Ok("inverse") => config::ChipStyle::Inverse,
+            _ => config::ChipStyle::Surface,
         };
+        let p = test_chip(style);
         let out = std::env::var("FOOTWIN_DUMP").expect("set FOOTWIN_DUMP to a path");
         std::fs::write(out, script(&g, &p)).unwrap();
     }
