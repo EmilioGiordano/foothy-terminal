@@ -257,8 +257,8 @@ struct App {
     /// palette stays bounded work (docs/02 §3 rule 7).
     themes: Option<overlay::ThemeList>,
     open: Option<Opened>,
-    /// Shown in the palette footer. A failed write has nowhere else to go:
-    /// stderr is gone in release (windows_subsystem).
+    /// Shown in the palette footer, cleared when it opens. A failed write has
+    /// nowhere else to go: stderr is gone in release (windows_subsystem).
     status: Option<String>,
 }
 
@@ -577,6 +577,18 @@ impl App {
         true
     }
 
+    /// None once the text is on the clipboard. The two failures read
+    /// differently on purpose: one is the user's to fix, the other is not.
+    fn copy_notice(&mut self) -> Option<String> {
+        if !self.panes.focused().is_some_and(|p| p.term.has_selection()) {
+            return Some("Nothing selected: select with the mouse, then copy.".into());
+        }
+        if !self.copy() {
+            return Some("Copy failed: the clipboard would not take the text.".into());
+        }
+        None
+    }
+
     fn theme_list(&mut self) -> &overlay::ThemeList {
         self.themes.get_or_insert_with(|| {
             let (list, problems) = overlay::ThemeList::build();
@@ -598,6 +610,8 @@ impl App {
         self.preview = None;
         self.selecting = false;
         self.set_cursor(CursorIcon::Default);
+        // A notice belongs to the session that produced it.
+        self.status = None;
 
         let current = self.current_theme.clone();
         let entries = self.theme_list().entries.clone();
@@ -723,8 +737,33 @@ impl App {
                 }
                 self.redraw_soon();
             }
+            // Copy and Paste can have nothing to do, and a row that does
+            // nothing and says nothing is indistinguishable from a bug. The
+            // notice lives in the palette footer, so they are answered here,
+            // before the close.
+            palette::Outcome::Run(palette::Action::Copy) => match self.copy_notice() {
+                Some(note) => {
+                    self.status = Some(note);
+                    self.redraw_soon();
+                }
+                None => self.close_palette(true),
+            },
+            palette::Outcome::Run(palette::Action::Paste) => {
+                match clipboard::get_text().filter(|t| !t.is_empty()) {
+                    Some(text) => {
+                        // Closed first: the paste warning is a modal dialog.
+                        self.close_palette(true);
+                        self.paste_text(&text);
+                        self.redraw_soon();
+                    }
+                    None => {
+                        self.status = Some("Nothing to paste: the clipboard has no text.".into());
+                        self.redraw_soon();
+                    }
+                }
+            }
             palette::Outcome::Run(action) => {
-                // Closed first: paste opens a modal, and Close may exit.
+                // Closed first: Close pane may exit.
                 self.close_palette(true);
                 self.run_action(action, event_loop);
             }
@@ -743,13 +782,9 @@ impl App {
             palette::Action::SplitRight => self.split(DropZone::Right),
             palette::Action::SplitDown => self.split(DropZone::Bottom),
             palette::Action::ClosePane => self.close_focused(event_loop),
-            palette::Action::Copy => {
-                self.copy();
-            }
-            palette::Action::Paste => {
-                self.paste();
-                self.redraw_soon();
-            }
+            // Both answered in palette_outcome, where the palette is still
+            // open to carry their notice.
+            palette::Action::Copy | palette::Action::Paste => {}
             palette::Action::ZoomIn => self.zoom(1),
             palette::Action::ZoomOut => self.zoom(-1),
             palette::Action::ResetZoom => self.reset_zoom(),
@@ -786,8 +821,8 @@ impl App {
 
     /// The pin notice belongs with the theme list, where it is read before
     /// Enter: a successful commit closes the palette and nobody would see it.
-    /// A failed save is the one case that keeps the palette open for its own
-    /// notice.
+    /// A failed save, and a command with nothing to do, keep the palette open
+    /// for their own notice.
     fn palette_notes(&self, mode: palette::Mode) -> Vec<String> {
         let mut notes = Vec::new();
         if let Some(status) = self.status.clone() {
@@ -800,25 +835,27 @@ impl App {
     }
 
     fn paste(&mut self) {
-        let Some(text) = clipboard::get_text() else {
-            return;
-        };
-        if text.is_empty() {
-            return;
+        if let Some(text) = clipboard::get_text().filter(|t| !t.is_empty()) {
+            self.paste_text(&text);
         }
+    }
+
+    /// Split from the clipboard read so the palette can report an empty
+    /// clipboard before it closes.
+    fn paste_text(&mut self, text: &str) {
         let bracketed = self
             .panes
             .focused()
             .is_some_and(|p| p.term.bracketed_paste());
 
         if self.cfg.paste_warning
-            && let Some(message) = warning_for(paste::assess(&text, bracketed), &text)
+            && let Some(message) = warning_for(paste::assess(text, bracketed), text)
             && !chrome::confirm(self.hwnd as _, "Confirm paste", &message)
         {
             return;
         }
 
-        let text = paste::normalize(&text);
+        let text = paste::normalize(text);
         if bracketed {
             self.send(&paste::bracket(&text));
         } else {
