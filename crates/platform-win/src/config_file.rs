@@ -65,16 +65,32 @@ pub fn themes_dir() -> Option<PathBuf> {
 /// left out: `load` would refuse them, so showing one promises a theme that
 /// cannot be committed.
 pub fn user_theme_names() -> Vec<String> {
-    let Some(dir) = themes_dir() else {
-        return Vec::new();
-    };
+    match themes_dir() {
+        Some(dir) => user_theme_names_in(&dir),
+        None => Vec::new(),
+    }
+}
+
+/// A themes directory is often a cloned repository, so the name gate is not
+/// enough: `README.md` passes it, and a subdirectory resolves to nothing at
+/// all. Only an entry that is a file and parses to at least one colour is a
+/// theme the picker may offer.
+pub fn user_theme_names_in(dir: &std::path::Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     entries
         .flatten()
+        // Not `file_type`: it does not follow a symlink, and a theme managed
+        // by a dotfile tool is usually one.
+        .filter(|e| e.path().is_file())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| is_theme_name(n))
+        .filter(|n| {
+            let read = |_: &str| std::fs::read_to_string(dir.join(n)).ok();
+            let (layer, _) = theme_layer(n, &read);
+            !layer.dark.is_empty() || !layer.light.is_empty()
+        })
         .collect()
 }
 
@@ -647,6 +663,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Picking a row that is not a theme writes a name that never resolves
+    /// again, so anything but a parsable file has to be left out.
+    #[test]
+    fn only_a_file_that_parses_to_colours_is_offered_as_a_users_theme() {
+        let dir = std::env::temp_dir().join("foothy-test-themes-dir");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("subdir")).unwrap();
+        std::fs::write(dir.join("README.md"), "# My themes\n\nCopy one in.\n").unwrap();
+        std::fs::write(dir.join("LICENSE"), "").unwrap();
+        std::fs::write(dir.join("mine.conf"), "[colors-dark]\nbackground=010203\n").unwrap();
+
+        let names = user_theme_names_in(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(names, ["mine.conf"]);
     }
 
     #[test]
