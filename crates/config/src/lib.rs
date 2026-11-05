@@ -98,8 +98,7 @@ impl PartialColors {
 
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Settings {
-    /// A path to a .ttf. Family-name lookup needs OS font enumeration, which
-    /// is not this layer's business.
+    /// A path to a .ttf, not a family name.
     pub font: Option<String>,
     pub font_size: Option<f32>,
     pub pad: Option<u32>,
@@ -132,7 +131,6 @@ pub struct Partial {
     pub light: PartialColors,
 }
 
-/// `over` wins field by field; anything it leaves unset keeps `base`.
 pub fn merge(base: Partial, over: Partial) -> Partial {
     Partial {
         settings: Settings::merge(base.settings, over.settings),
@@ -141,17 +139,15 @@ pub fn merge(base: Partial, over: Partial) -> Partial {
     }
 }
 
-/// Theme text goes through this and never through bare `parse`: it filters in
-/// the same call, so no caller can parse a theme and forget the filter.
+/// Theme text goes through this, never through bare `parse`: the filter runs in
+/// the same call so no caller can forget it.
 pub fn parse_theme(text: &str) -> (Partial, Vec<Problem>) {
     let (partial, problems) = parse(text);
     (from_theme(partial), problems)
 }
 
-/// A theme may contribute colours and the variant, nothing else. Named field
-/// by field on purpose: blanking the forbidden ones would leak the next
-/// setting added to `Settings`, such as a `paste-warning=no` turning off the
-/// multiline-paste guard without telling the user.
+/// Named field by field, not blanked: a blanket copy would leak every setting
+/// later added to `Settings` into what a theme can change.
 fn from_theme(theme: Partial) -> Partial {
     Partial {
         settings: Settings {
@@ -163,8 +159,6 @@ fn from_theme(theme: Partial) -> Partial {
     }
 }
 
-/// Colours belong to one variant only, so a layer that knows which one it is
-/// building for files them in the matching slot and leaves the other empty.
 pub fn into_variant(variant: Variant, colors: PartialColors, settings: Settings) -> Partial {
     let (dark, light) = match variant {
         Variant::Dark => (colors, PartialColors::default()),
@@ -213,8 +207,6 @@ pub const DEFAULT_BACKGROUND: u32 = 0x0024_2424;
 pub const DEFAULT_FONT_SIZE: f32 = 16.0;
 pub const DEFAULT_ALPHA: u8 = 235;
 
-// foot's own defaults, upstream/foot/config.c:33-68. The man page still
-// documents the old Solarized values; the code is what ships.
 const DEFAULT_16: [u32; 16] = [
     0x0024_2424,
     0x00f6_2b5a,
@@ -270,9 +262,6 @@ impl Default for Config {
 }
 
 impl Partial {
-    /// The variant actually used for `wanted`: the file's own
-    /// `initial-color-theme` overrides the request, and a theme carrying only
-    /// the other variant is used rather than ignored.
     pub fn variant_for(&self, wanted: Variant) -> Variant {
         let asked = self.settings.initial_variant.unwrap_or(wanted);
         let (same, other) = match asked {
@@ -293,8 +282,6 @@ impl Partial {
         }
     }
 
-    /// Fill every hole with a default. Colours are taken from one variant
-    /// only: mixing a light foreground into a dark background is never right.
     pub fn resolve(&self, wanted: Variant) -> Config {
         let variant = self.variant_for(wanted);
         let c = self.colors_for(wanted);
