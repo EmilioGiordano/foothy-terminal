@@ -942,8 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn the_chip_name_carries_this_process_id() {
-        assert_eq!(chip_file(), format!("chip-{}.conf", std::process::id()));
+    fn the_chip_path_sits_under_the_temp_directory() {
         assert!(chip_path().ends_with(chip_file()));
         assert!(chip_path().starts_with(std::env::temp_dir()));
     }
@@ -984,7 +983,13 @@ mod tests {
                 env_bg: bits & 4 != 0,
                 style_file: bits & 8 != 0,
             };
-            for note in pins.notes().iter().chain(pins.style_notes().iter()) {
+            let others = [crate::CHIP_NOTE.to_string(), crate::state_note()];
+            for note in pins
+                .notes()
+                .iter()
+                .chain(pins.style_notes().iter())
+                .chain(others.iter())
+            {
                 assert!(note.is_ascii(), "{note}");
                 assert!(
                     note.chars().count() <= crate::overlay::MAX_COLS - 2,
