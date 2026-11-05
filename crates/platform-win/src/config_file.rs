@@ -49,7 +49,13 @@ impl State {
     }
 }
 
-/// What would survive a restart and defeat a theme written to state.ini.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Field {
+    Theme,
+    PromptStyle,
+}
+
+/// What would survive a restart and defeat a pick written to state.ini.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Pins {
     pub theme_file: bool,
@@ -264,10 +270,19 @@ pub fn compose(files: &Partial, theme: Partial, env: &impl Fn(&str) -> Option<St
 /// Writes the app's own file. Temp plus rename so a crash mid-write cannot
 /// leave a half-parsed state.ini behind. The temp carries the process id: two
 /// windows committing at once would otherwise share one file and lose a pick.
-pub fn save_state_in(dir: &std::path::Path, state: &State) -> std::io::Result<()> {
+///
+/// Only `field` is taken from `state`; the rest of the file is re-read first.
+/// A second window's pick landed after this one loaded, and rewriting from a
+/// load-time snapshot would drop it.
+pub fn save_state_in(dir: &std::path::Path, state: &State, field: Field) -> std::io::Result<()> {
+    let mut merged = read_state_in(dir)?;
+    match field {
+        Field::Theme => merged.theme = state.theme.clone(),
+        Field::PromptStyle => merged.prompt_style = state.prompt_style,
+    }
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!("{STATE_FILE}.{}.tmp", std::process::id()));
-    let out = std::fs::write(&tmp, state.body())
+    let out = std::fs::write(&tmp, merged.body())
         .and_then(|()| std::fs::rename(&tmp, dir.join(STATE_FILE)));
     if out.is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -275,10 +290,25 @@ pub fn save_state_in(dir: &std::path::Path, state: &State) -> std::io::Result<()
     out
 }
 
-pub fn save_state(state: &State) -> std::io::Result<()> {
+/// Absent is empty; any other read error fails the save rather than writing a
+/// file with the other window's pick missing.
+fn read_state_in(dir: &std::path::Path) -> std::io::Result<State> {
+    let text = match std::fs::read_to_string(dir.join(STATE_FILE)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(State::default()),
+        Err(e) => return Err(e),
+    };
+    let (partial, _) = parse(&text);
+    Ok(State {
+        theme: partial.settings.theme,
+        prompt_style: partial.settings.prompt_style,
+    })
+}
+
+pub fn save_state(state: &State, field: Field) -> std::io::Result<()> {
     let dir = dir()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "APPDATA is not set"))?;
-    save_state_in(&dir, state)
+    save_state_in(&dir, state, field)
 }
 
 /// Reserved in every directory and with any extension; opening one reaches the
@@ -630,6 +660,7 @@ mod tests {
                 theme: Some(candidate.to_string()),
                 prompt_style: None,
             },
+            Field::Theme,
         )
         .unwrap();
         let written = std::fs::read_to_string(dir.join(STATE_FILE)).unwrap();
@@ -705,6 +736,7 @@ mod tests {
                 theme: Some("nord".to_string()),
                 prompt_style: None,
             },
+            Field::Theme,
         )
         .unwrap();
         let text = std::fs::read_to_string(dir.join(STATE_FILE)).unwrap();
@@ -732,6 +764,7 @@ mod tests {
                     theme: Some("nord".to_string()),
                     prompt_style: None,
                 },
+                Field::Theme,
             )
             .is_err()
         );
@@ -811,7 +844,6 @@ mod tests {
         assert_eq!(out.files.settings.theme.as_deref(), Some("ferra"));
     }
 
-    /// One file carries both picks, so saving either has to keep the other.
     #[test]
     fn the_state_file_round_trips_the_theme_and_the_prompt_style() {
         let dir = std::env::temp_dir().join("foothy-test-state-pair");
@@ -821,7 +853,8 @@ mod tests {
                 theme: Some("nord".to_string()),
                 prompt_style: Some(style),
             };
-            save_state_in(&dir, &written).unwrap();
+            save_state_in(&dir, &written, Field::Theme).unwrap();
+            save_state_in(&dir, &written, Field::PromptStyle).unwrap();
             let text = std::fs::read_to_string(dir.join(STATE_FILE)).unwrap();
             let _ = std::fs::remove_dir_all(&dir);
 
@@ -834,6 +867,32 @@ mod tests {
         }
         let empty = State::default();
         assert!(!empty.body().contains("theme"), "{}", empty.body());
+    }
+
+    #[test]
+    fn saving_one_pick_keeps_a_pick_another_window_wrote() {
+        let dir = std::env::temp_dir().join("foothy-test-state-overlay");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(STATE_FILE), "theme=nord\n").unwrap();
+
+        let stale = State {
+            theme: Some("ferra".to_string()),
+            prompt_style: Some(config::ChipStyle::Inverse),
+        };
+        save_state_in(&dir, &stale, Field::PromptStyle).unwrap();
+        let text = std::fs::read_to_string(dir.join(STATE_FILE)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let read = move |name: &str| (name == STATE_FILE).then(|| text.clone());
+        let out = load(read, none, none);
+        assert_eq!(
+            out.state,
+            State {
+                theme: Some("nord".to_string()),
+                prompt_style: Some(config::ChipStyle::Inverse),
+            }
+        );
     }
 
     /// The box clips a long line, and the tail is the part that matters.

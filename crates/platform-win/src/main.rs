@@ -830,7 +830,7 @@ impl App {
         self.show_theme(i);
         self.current_theme = Some(name.clone());
         self.state.theme = Some(name);
-        self.save_state()
+        self.save_state(config_file::Field::Theme)
     }
 
     fn commit_style(&mut self, i: usize) -> bool {
@@ -842,13 +842,11 @@ impl App {
         // would otherwise bring the old style back.
         self.files.settings.prompt_style = Some(style);
         self.state.prompt_style = Some(style);
-        self.save_state()
+        self.save_state(config_file::Field::PromptStyle)
     }
 
-    /// True when the pick could not be written, so it holds for this session
-    /// only.
-    fn save_state(&mut self) -> bool {
-        match config_file::save_state(&self.state) {
+    fn save_state(&mut self, field: config_file::Field) -> bool {
+        match config_file::save_state(&self.state, field) {
             Ok(()) => {
                 self.status = None;
                 false
