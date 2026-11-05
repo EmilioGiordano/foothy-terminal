@@ -1,7 +1,7 @@
 use render::Renderer;
 
-/// The xterm cube and ramp. `render` cannot reach `config`, so an example
-/// supplies its own instead of leaving indexed colours black.
+/// The xterm cube and ramp. An example supplies its own rather than `render`
+/// taking a dependency on `config` for it.
 fn palette() -> [u32; 256] {
     const ANSI16: [u32; 16] = [
         0x0000_0000,
