@@ -123,6 +123,27 @@ fn blink_takes_system_off_or_milliseconds() {
 }
 
 #[test]
+fn prompt_style_takes_surface_or_inverse() {
+    assert_eq!(
+        clean("prompt-style=surface\n").settings.prompt_style,
+        Some(config::ChipStyle::Surface)
+    );
+    assert_eq!(
+        clean("prompt-style=INVERSE\n").settings.prompt_style,
+        Some(config::ChipStyle::Inverse)
+    );
+    let (p, problems) = parse("prompt-style=rainbow\n");
+    assert_eq!(p.settings.prompt_style, None);
+    assert_eq!(problems.len(), 1);
+    assert_eq!(problems[0].line, 1);
+    assert!(
+        problems[0].message.contains("surface"),
+        "{}",
+        problems[0].message
+    );
+}
+
+#[test]
 fn paste_warning_uses_foots_boolean_vocabulary() {
     for yes in ["yes", "on", "true", "1", "YES"] {
         let p = clean(&format!("paste-warning={yes}\n"));
