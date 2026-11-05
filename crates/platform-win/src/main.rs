@@ -263,6 +263,7 @@ struct App {
     files: config::Partial,
     pins: config_file::Pins,
     current_theme: Option<String>,
+    state: config_file::State,
     /// ~86 theme files: built on the first open and kept, so opening the
     /// palette stays bounded work (docs/02 §3 rule 7).
     themes: Option<overlay::ThemeList>,
@@ -277,8 +278,9 @@ struct Opened {
     palette: palette::Palette,
     /// Restored by Esc, including the titlebar variant.
     saved: config::Config,
-    /// Last previewed theme, so a repeated index does not repaint.
-    shown: Option<usize>,
+    /// Last previewed row, so a repeated index does not repaint. Keyed by
+    /// mode: two lists number their rows from zero.
+    shown: Option<(palette::Mode, usize)>,
 }
 
 /// A file that exists is not a font, so both the read and the parse fall back.
@@ -303,6 +305,7 @@ impl App {
         }
         let cfg = loaded.config;
         let current_theme = loaded.files.settings.theme.clone();
+        let state = loaded.state.clone();
 
         let mut renderer = build_renderer(cfg.font.as_deref(), cfg.font_size, &cfg.colors.palette)?;
         renderer.set_padding(cfg.pad as usize);
@@ -354,6 +357,7 @@ impl App {
             files: loaded.files,
             pins: loaded.pins,
             current_theme,
+            state,
             themes: None,
             open: None,
             status: None,
@@ -635,9 +639,10 @@ impl App {
         self.status = None;
 
         let current = self.current_theme.clone();
+        let style = self.cfg.prompt_style;
         let entries = self.theme_list().entries.clone();
         self.open = Some(Opened {
-            palette: palette::Palette::commands(entries, current.as_deref()),
+            palette: palette::Palette::commands(entries, current.as_deref(), style),
             saved: self.cfg.clone(),
             shown: None,
         });
@@ -673,6 +678,13 @@ impl App {
 
     /// Clearing `shown` is part of it: left set, re-entering the theme list on
     /// the same index would be taken for a repeat and skip the repaint.
+    fn show_style(&mut self, style: config::ChipStyle) {
+        let mut cfg = self.cfg.clone();
+        cfg.prompt_style = style;
+        self.apply_look(&cfg);
+        self.cfg = cfg;
+    }
+
     fn restore_look(&mut self) {
         let Some(open) = self.open.as_mut() else {
             return;
@@ -726,41 +738,44 @@ impl App {
         match outcome {
             palette::Outcome::Stay => self.redraw_soon(),
             palette::Outcome::Preview(i) => {
+                let Some(mode) = self.open.as_ref().map(|o| o.palette.mode()) else {
+                    return;
+                };
                 // Backspace on an empty filter and the wheel at its clamp both
                 // repeat the index; repainting the window for that is waste.
-                let repeat = self.open.as_ref().is_some_and(|o| o.shown == Some(i));
+                let repeat = self
+                    .open
+                    .as_ref()
+                    .is_some_and(|o| o.shown == Some((mode, i)));
                 if !repeat {
                     if let Some(open) = self.open.as_mut() {
-                        open.shown = Some(i);
+                        open.shown = Some((mode, i));
                     }
-                    self.show_theme(i);
+                    match mode {
+                        palette::Mode::Themes => self.show_theme(i),
+                        palette::Mode::Styles => {
+                            if let Some(style) = palette::style(i) {
+                                self.show_style(style);
+                            }
+                        }
+                        palette::Mode::Commands => {}
+                    }
                 }
                 self.redraw_soon();
             }
             palette::Outcome::Commit(i) => {
-                let name = self.themes.as_ref().map(|l| l.entries[i].name.clone());
-                self.show_theme(i);
-                let mut failed = false;
-                if let Some(name) = name {
-                    self.current_theme = Some(name.clone());
-                    self.status = match config_file::save_theme(&name) {
-                        Ok(()) => None,
-                        Err(e) => {
-                            eprintln!("foothy: could not write {}: {e}", config_file::STATE_FILE);
-                            failed = true;
-                            Some(format!(
-                                "Could not save {}: the theme applies to this session only.",
-                                config_file::STATE_FILE
-                            ))
-                        }
-                    };
-                }
+                let failed = match self.open.as_ref().map(|o| o.palette.mode()) {
+                    Some(palette::Mode::Themes) => self.commit_theme(i),
+                    Some(palette::Mode::Styles) => self.commit_style(i),
+                    Some(palette::Mode::Commands) | None => false,
+                };
                 if failed {
                     // The notice is drawn inside the palette and nowhere else,
                     // so a failed save keeps it open to be read. Esc must then
                     // keep the pick, or the notice becomes a lie.
                     if let Some(open) = self.open.as_mut() {
                         open.saved = self.cfg.clone();
+                        open.palette.set_current_style(self.cfg.prompt_style);
                         if let Some(name) = &self.current_theme {
                             open.palette.set_current(name);
                         }
@@ -808,10 +823,51 @@ impl App {
         }
     }
 
+    fn commit_theme(&mut self, i: usize) -> bool {
+        let Some(name) = self.themes.as_ref().map(|l| l.entries[i].name.clone()) else {
+            return false;
+        };
+        self.show_theme(i);
+        self.current_theme = Some(name.clone());
+        self.state.theme = Some(name);
+        self.save_state()
+    }
+
+    fn commit_style(&mut self, i: usize) -> bool {
+        let Some(style) = palette::style(i) else {
+            return false;
+        };
+        self.show_style(style);
+        // Also into `files`: a later theme preview re-composes from it and
+        // would otherwise bring the old style back.
+        self.files.settings.prompt_style = Some(style);
+        self.state.prompt_style = Some(style);
+        self.save_state()
+    }
+
+    /// True when the pick could not be written, so it holds for this session
+    /// only.
+    fn save_state(&mut self) -> bool {
+        match config_file::save_state(&self.state) {
+            Ok(()) => {
+                self.status = None;
+                false
+            }
+            Err(e) => {
+                eprintln!("foothy: could not write {}: {e}", config_file::STATE_FILE);
+                self.status = Some(format!(
+                    "Could not save {}: the pick applies to this session only.",
+                    config_file::STATE_FILE
+                ));
+                true
+            }
+        }
+    }
+
     fn run_action(&mut self, action: palette::Action, event_loop: &ActiveEventLoop) {
         match action {
             // The state machine answers this one by switching mode.
-            palette::Action::SelectTheme => {}
+            palette::Action::SelectTheme | palette::Action::SelectPromptStyle => {}
             palette::Action::SplitRight => self.split(DropZone::Right),
             palette::Action::SplitDown => self.split(DropZone::Bottom),
             palette::Action::ClosePane => self.close_focused(event_loop),
@@ -861,8 +917,10 @@ impl App {
         if let Some(status) = self.status.clone() {
             notes.push(status);
         }
-        if mode == palette::Mode::Themes {
-            notes.extend(self.pins.notes());
+        match mode {
+            palette::Mode::Themes => notes.extend(self.pins.notes()),
+            palette::Mode::Styles => notes.extend(self.pins.style_notes()),
+            palette::Mode::Commands => {}
         }
         notes
     }
