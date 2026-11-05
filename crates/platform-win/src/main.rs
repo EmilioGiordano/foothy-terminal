@@ -682,19 +682,30 @@ impl App {
             palette::Outcome::Commit(i) => {
                 let name = self.themes.as_ref().map(|l| l.entries[i].name.clone());
                 self.show_theme(i);
-                self.open = None;
+                let mut failed = false;
                 if let Some(name) = name {
                     self.current_theme = Some(name.clone());
                     self.status = match config_file::save_theme(&name) {
                         Ok(()) => None,
                         Err(e) => {
                             eprintln!("foothy: could not write {}: {e}", config_file::STATE_FILE);
+                            failed = true;
                             Some(format!(
                                 "Could not save {}: the theme applies to this session only.",
                                 config_file::STATE_FILE
                             ))
                         }
                     };
+                }
+                if failed {
+                    // The notice is drawn inside the palette and nowhere else,
+                    // so a failed save keeps it open to be read. Esc must then
+                    // keep the pick, or the notice becomes a lie.
+                    if let Some(open) = self.open.as_mut() {
+                        open.saved = self.cfg.clone();
+                    }
+                } else {
+                    self.open = None;
                 }
                 self.redraw_soon();
             }
@@ -756,7 +767,9 @@ impl App {
     }
 
     /// The pin notice belongs with the theme list, where it is read before
-    /// Enter: after a commit the palette is gone and nobody would see it.
+    /// Enter: a successful commit closes the palette and nobody would see it.
+    /// A failed save is the one case that keeps the palette open for its own
+    /// notice.
     fn palette_notes(&self, mode: palette::Mode) -> Vec<String> {
         let mut notes = Vec::new();
         if let Some(status) = self.status.clone() {
