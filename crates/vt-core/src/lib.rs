@@ -272,17 +272,17 @@ mod tests {
     #[test]
     fn plain_text_reaches_grid() {
         let mut t = term();
-        t.feed(b"hola");
-        assert_eq!(t.line_text(0), "hola");
+        t.feed(b"word");
+        assert_eq!(t.line_text(0), "word");
         assert_eq!(t.cursor(), (0, 4));
     }
 
     #[test]
     fn newline_advances_row() {
         let mut t = term();
-        t.feed(b"uno\r\ndos");
-        assert_eq!(t.line_text(0), "uno");
-        assert_eq!(t.line_text(1), "dos");
+        t.feed(b"one\r\ntwo");
+        assert_eq!(t.line_text(0), "one");
+        assert_eq!(t.line_text(1), "two");
     }
 
     #[test]
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn csi_2j_clears_screen() {
         let mut t = term();
-        t.feed(b"basura\x1b[2J\x1b[H");
+        t.feed(b"junk\x1b[2J\x1b[H");
         assert_eq!(t.screen_text(), "");
     }
 
@@ -351,30 +351,30 @@ mod tests {
     fn scrolling_up_reveals_scrollback() {
         let mut t = Terminal::new(TermSize::new(20, 3));
         for i in 1..=10 {
-            t.feed(format!("linea {i}\r\n").as_bytes());
+            t.feed(format!("line {i}\r\n").as_bytes());
         }
         assert_eq!(t.display_offset(), 0);
-        assert_eq!(t.line_text(0), "linea 9");
+        assert_eq!(t.line_text(0), "line 9");
 
         t.scroll(Scroll::Delta(3));
         assert_eq!(t.display_offset(), 3);
-        assert_eq!(t.line_text(0), "linea 6");
+        assert_eq!(t.line_text(0), "line 6");
 
         t.scroll(Scroll::Bottom);
         assert_eq!(t.display_offset(), 0);
-        assert_eq!(t.line_text(0), "linea 9");
+        assert_eq!(t.line_text(0), "line 9");
     }
 
     #[test]
     fn scroll_is_clamped_at_both_ends() {
         let mut t = Terminal::new(TermSize::new(20, 3));
         for i in 1..=10 {
-            t.feed(format!("linea {i}\r\n").as_bytes());
+            t.feed(format!("line {i}\r\n").as_bytes());
         }
         t.scroll(Scroll::Delta(9999));
         let top = t.display_offset();
         t.scroll(Scroll::Delta(1));
-        assert_eq!(t.display_offset(), top, "no deberia pasarse del inicio");
+        assert_eq!(t.display_offset(), top, "must not scroll past the top");
 
         t.scroll(Scroll::Delta(-9999));
         assert_eq!(t.display_offset(), 0);
@@ -383,26 +383,26 @@ mod tests {
     #[test]
     fn selecting_a_span_yields_its_text() {
         let mut t = term();
-        t.feed(b"hola mundo");
+        t.feed(b"word stuff");
         t.start_selection(0, 0, Side::Left, SelectionType::Simple);
         t.update_selection(0, 3, Side::Right);
-        assert_eq!(t.selection_text().as_deref(), Some("hola"));
+        assert_eq!(t.selection_text().as_deref(), Some("word"));
         assert!(t.has_selection());
     }
 
     #[test]
     fn selection_spans_lines() {
         let mut t = term();
-        t.feed(b"uno\r\ndos");
+        t.feed(b"one\r\ntwo");
         t.start_selection(0, 0, Side::Left, SelectionType::Simple);
         t.update_selection(1, 2, Side::Right);
-        assert_eq!(t.selection_text().as_deref(), Some("uno\ndos"));
+        assert_eq!(t.selection_text().as_deref(), Some("one\ntwo"));
     }
 
     #[test]
     fn is_selected_marks_only_the_range() {
         let mut t = term();
-        t.feed(b"hola mundo");
+        t.feed(b"word stuff");
         t.start_selection(0, 5, Side::Left, SelectionType::Simple);
         t.update_selection(0, 9, Side::Right);
         assert!(!t.is_selected(0, 4));
@@ -415,7 +415,7 @@ mod tests {
     #[test]
     fn clearing_drops_the_selection() {
         let mut t = term();
-        t.feed(b"hola");
+        t.feed(b"word");
         t.start_selection(0, 0, Side::Left, SelectionType::Simple);
         t.update_selection(0, 3, Side::Right);
         t.clear_selection();
@@ -428,21 +428,20 @@ mod tests {
     fn selection_follows_the_scrollback() {
         let mut t = Terminal::new(TermSize::new(20, 3));
         for i in 1..=10 {
-            t.feed(format!("linea {i}\r\n").as_bytes());
+            t.feed(format!("line {i}\r\n").as_bytes());
         }
         t.scroll(Scroll::Delta(3));
-        // Viewport row 0 is now "linea 6".
         t.start_selection(0, 0, Side::Left, SelectionType::Simple);
-        t.update_selection(0, 6, Side::Right);
-        assert_eq!(t.selection_text().as_deref(), Some("linea 6"));
+        t.update_selection(0, 5, Side::Right);
+        assert_eq!(t.selection_text().as_deref(), Some("line 6"));
     }
 
     #[test]
     fn resize_keeps_content() {
         let mut t = term();
-        t.feed(b"hola");
+        t.feed(b"word");
         t.resize(TermSize::new(40, 10));
         assert_eq!(t.size(), TermSize::new(40, 10));
-        assert_eq!(t.line_text(0), "hola");
+        assert_eq!(t.line_text(0), "word");
     }
 }
