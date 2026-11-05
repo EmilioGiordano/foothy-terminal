@@ -545,6 +545,10 @@ mod tests {
         assert!(chip_file_accepted(
             &one_key_file(">").replace('\n', "\r\r\n")
         ));
+        // A PowerShell hashtable looks its keys up case-insensitively.
+        assert!(chip_file_accepted(
+            &one_key_file(">").replace("chevron", "CHEVRON")
+        ));
     }
 
     fn one_key_file(chevron: &str) -> String {
@@ -580,7 +584,8 @@ mod tests {
             }
             found.push(&line[..j]);
         }
-        KEYS.iter().all(|k| found.contains(k))
+        KEYS.iter()
+            .all(|k| found.iter().any(|f| f.eq_ignore_ascii_case(k)))
     }
 
     /// Mirrors the regex in `__footChipRead`: `m` lower-case only, and nothing
