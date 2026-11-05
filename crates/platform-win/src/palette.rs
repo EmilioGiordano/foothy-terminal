@@ -158,6 +158,12 @@ impl Palette {
         &self.filter
     }
 
+    /// The snapshot taken at open time: a commit the caller kept for the
+    /// session must reach it, or re-entering the list previews the old theme.
+    pub fn set_current(&mut self, name: &str) {
+        self.current = Some(name.to_string());
+    }
+
     pub fn key(&mut self, key: Key) -> Outcome {
         match key {
             Key::Esc => match self.mode.parent() {
@@ -588,6 +594,20 @@ mod tests {
     fn an_unknown_current_theme_falls_back_to_the_first_row() {
         let p = themes(many(5), Some("not-bundled"));
         assert!(p.visible(8)[0].selected);
+    }
+
+    #[test]
+    fn a_committed_theme_the_caller_keeps_is_the_one_reopened() {
+        let mut p = themes(entries(&["one", "two", "three"]), Some("one"));
+        p.key(Key::Down);
+        assert_eq!(p.key(Key::Enter), Outcome::Commit(1));
+        p.set_current("two");
+        assert_eq!(p.key(Key::Esc), Outcome::Restore);
+        assert_eq!(p.key(Key::Enter), Outcome::Preview(1));
+        assert_eq!(
+            p.visible(50).iter().find(|r| r.selected).unwrap().label,
+            "two"
+        );
     }
 
     #[test]

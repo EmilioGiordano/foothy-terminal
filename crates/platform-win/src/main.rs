@@ -745,6 +745,9 @@ impl App {
                     // keep the pick, or the notice becomes a lie.
                     if let Some(open) = self.open.as_mut() {
                         open.saved = self.cfg.clone();
+                        if let Some(name) = &self.current_theme {
+                            open.palette.set_current(name);
+                        }
                     }
                 } else {
                     self.open = None;
