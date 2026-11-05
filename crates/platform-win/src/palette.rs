@@ -6,6 +6,17 @@ pub enum Mode {
     Themes,
 }
 
+impl Mode {
+    /// Esc steps back to the parent; only the root closes the palette. No
+    /// wildcard arm: a new mode cannot compile without declaring its parent.
+    pub fn parent(self) -> Option<Mode> {
+        match self {
+            Mode::Commands => None,
+            Mode::Themes => Some(Mode::Commands),
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     SelectTheme,
@@ -20,6 +31,25 @@ pub enum Action {
     ScrollToTop,
 }
 
+impl Action {
+    /// The only place a row is tied to the list it opens. No wildcard arm:
+    /// `_ => None` would make a new opener silently run as a plain action.
+    fn opens(self) -> Option<Mode> {
+        match self {
+            Action::SelectTheme => Some(Mode::Themes),
+            Action::SplitRight
+            | Action::SplitDown
+            | Action::ClosePane
+            | Action::Copy
+            | Action::Paste
+            | Action::ZoomIn
+            | Action::ZoomOut
+            | Action::ResetZoom
+            | Action::ScrollToTop => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Outcome {
     Stay,
@@ -27,8 +57,8 @@ pub enum Outcome {
     Preview(usize),
     Commit(usize),
     Run(Action),
-    /// Drop the preview but keep the palette open: Esc steps out of the theme
-    /// list instead of closing.
+    /// Drop the preview but keep the palette open: Esc steps out of a sub-list
+    /// instead of closing.
     Restore,
     Cancel,
 }
@@ -124,9 +154,9 @@ impl Palette {
 
     pub fn key(&mut self, key: Key) -> Outcome {
         match key {
-            Key::Esc => match self.mode {
-                Mode::Themes => self.back(),
-                Mode::Commands => Outcome::Cancel,
+            Key::Esc => match self.mode.parent() {
+                Some(parent) => self.back(parent),
+                None => Outcome::Cancel,
             },
             Key::Enter => self.enter(),
             Key::Up => self.step(-1),
@@ -277,32 +307,50 @@ impl Palette {
         };
         match self.mode {
             Mode::Themes => Outcome::Commit(i),
-            Mode::Commands => match COMMANDS[i].0 {
-                Action::SelectTheme => {
-                    self.mode = Mode::Themes;
-                    // A filter typed over the commands must not narrow the themes.
-                    self.filter.clear();
-                    self.refilter();
-                    self.select_current();
-                    self.moved()
+            Mode::Commands => {
+                let action = COMMANDS[i].0;
+                match action.opens() {
+                    Some(sub) => self.open(sub),
+                    None => Outcome::Run(action),
                 }
-                other => Outcome::Run(other),
-            },
+            }
         }
     }
 
-    /// The mirror of entering the list: the filter the theme list collected is
-    /// not the one the command list had, so it cannot survive the step back.
-    fn back(&mut self) -> Outcome {
-        self.mode = Mode::Commands;
+    fn open(&mut self, sub: Mode) -> Outcome {
+        self.mode = sub;
+        // A filter typed over the commands must not narrow the sub-list.
+        self.filter.clear();
+        self.refilter();
+        // `select_current` reads `self.themes`, so it belongs to one mode only.
+        match sub {
+            Mode::Themes => self.select_current(),
+            Mode::Commands => {}
+        }
+        self.moved()
+    }
+
+    /// The mirror of opening the list: the filter the sub-list collected is not
+    /// the one the parent had, so it cannot survive the step back. The row to
+    /// land on is the one that opens the list being left, found and not assumed.
+    fn back(&mut self, parent: Mode) -> Outcome {
+        let from = self.mode;
+        self.mode = parent;
         self.filter.clear();
         self.refilter();
         self.sel = self
             .matches
             .iter()
-            .position(|&i| COMMANDS[i].0 == Action::SelectTheme)
+            .position(|&i| self.opener(i) == Some(from))
             .unwrap_or(0);
         Outcome::Restore
+    }
+
+    fn opener(&self, i: usize) -> Option<Mode> {
+        match self.mode {
+            Mode::Commands => COMMANDS[i].0.opens(),
+            Mode::Themes => None,
+        }
     }
 
     fn moved(&self) -> Outcome {
@@ -566,6 +614,41 @@ mod tests {
             "Select theme..."
         );
         assert_eq!(p.key(Key::Esc), Outcome::Cancel);
+    }
+
+    /// The rule rather than the one case: driven off `Action::opens`, so a
+    /// sub-list is covered the moment it is declared.
+    #[test]
+    fn esc_steps_back_from_every_sub_list_and_only_the_root_cancels() {
+        let openers: Vec<(usize, Mode)> = COMMANDS
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| c.0.opens().map(|sub| (i, sub)))
+            .collect();
+        assert!(!openers.is_empty());
+
+        let mut reached = vec![Mode::Commands];
+        for (i, sub) in openers {
+            let mut p = Palette::commands(many(40), None);
+            for _ in 0..i {
+                p.key(Key::Down);
+            }
+            p.key(Key::Enter);
+            assert_eq!(p.mode(), sub);
+            assert_eq!(sub.parent(), Some(Mode::Commands), "row {i}");
+            type_str(&mut p, "e");
+            assert_eq!(p.key(Key::Esc), Outcome::Restore, "row {i}");
+            assert_eq!(p.mode(), sub.parent().unwrap(), "row {i}");
+            assert_eq!(p.filter(), "", "row {i}");
+            assert_eq!(
+                p.visible(50).iter().find(|r| r.selected).unwrap().label,
+                COMMANDS[i].1,
+                "row {i}"
+            );
+            assert_eq!(p.key(Key::Esc), Outcome::Cancel, "row {i}");
+            reached.push(sub);
+        }
+        assert_eq!(reached.iter().filter(|m| m.parent().is_none()).count(), 1);
     }
 
     #[test]
