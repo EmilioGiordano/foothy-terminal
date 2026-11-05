@@ -7,8 +7,6 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use fontdue::{Font, FontSettings};
 use vt_core::{TermSize, Terminal};
 
-/// How the cursor is painted this frame. The caller decides, because focus and
-/// blink phase live in the platform layer, not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorLook {
     Block,
@@ -22,9 +20,8 @@ pub const MIN_FONT_PX: f32 = 6.0;
 pub const MAX_FONT_PX: f32 = 72.0;
 const FALLBACK_FONT_PX: f32 = 16.0;
 
-/// Every size entering fontdue goes through here. A negative or huge `scale`
-/// makes it ask for gigabytes and abort the process, and NaN survives the
-/// clamp and metrics to die at the first rasterisation.
+/// Every size entering fontdue goes through here: a negative or huge `scale`
+/// aborts the process, and NaN survives the clamp to die at rasterisation.
 fn sane_px(px: f32) -> f32 {
     if px.is_nan() {
         return FALLBACK_FONT_PX;
@@ -32,8 +29,6 @@ fn sane_px(px: f32) -> f32 {
     px.clamp(MIN_FONT_PX, MAX_FONT_PX)
 }
 
-// foot's own defaults, taken from upstream/foot/config.c:33-68. The man page
-// still documents the old Solarized values; the code is what ships.
 pub const DEFAULT_FG: u32 = 0x00ff_ffff;
 pub const DEFAULT_BG: u32 = 0x0024_2424;
 
@@ -99,9 +94,8 @@ impl Renderer {
         self.px
     }
 
-    /// Re-rasterises at the new size instead of scaling the bitmaps, so glyphs
-    /// stay crisp. The caller must recompute the grid afterwards: the cell
-    /// changed size, so the terminal now holds a different number of them.
+    /// The caller must recompute the grid afterwards: the cell changed size, so
+    /// the terminal holds a different number of them.
     pub fn set_font_size(&mut self, px: f32) -> bool {
         let px = sane_px(px);
         if (px - self.px).abs() < 0.01 {
@@ -135,7 +129,7 @@ impl Renderer {
         self.cell_h
     }
 
-    /// Draws `text` clipped to `(x, y, w)`, and returns where it ended.
+    /// Returns the x the pen stopped at.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_text(
         &mut self,
@@ -162,8 +156,6 @@ impl Renderer {
         pen
     }
 
-    /// Blends `color` over what is already there. Used for the drop preview,
-    /// which has to show the layout underneath it to be any use.
     pub fn tint_area(
         &self,
         buf: &mut [u32],
@@ -182,8 +174,6 @@ impl Renderer {
         }
     }
 
-    /// An outline, one pixel thick, blended like [`Self::tint_area`] so both
-    /// halves of the drop preview fade together.
     #[allow(clippy::too_many_arguments)]
     pub fn outline_area(
         &self,
@@ -200,8 +190,8 @@ impl Renderer {
         }
         self.tint_area(buf, width, height, (x, y, w, 1), color, alpha);
         self.tint_area(buf, width, height, (x, y + h - 1, w, 1), color, alpha);
-        // Blending is not idempotent, so the sides stop short of the corners the
-        // rows above already covered.
+        // Blending is not idempotent: the sides stop short of the corners the
+        // rows already covered.
         if h > 2 {
             self.tint_area(buf, width, height, (x, y + 1, 1, h - 2), color, alpha);
             self.tint_area(
@@ -215,7 +205,6 @@ impl Renderer {
         }
     }
 
-    /// A filled rectangle, for headers, dividers and focus borders.
     pub fn fill_area(
         &self,
         buf: &mut [u32],
@@ -228,7 +217,7 @@ impl Renderer {
         fill_rect(buf, width, height, x, y, w, h, color);
     }
 
-    /// Which cell a pixel lands on, plus which half of it (for selection).
+    /// Returns `(row, col, right_half)`.
     pub fn cell_at(
         &self,
         x: f64,
@@ -246,16 +235,13 @@ impl Renderer {
         (row, col, right_half)
     }
 
-    /// Where the grid starts, so leftover pixels are split evenly instead of
-    /// piling up on one edge.
     fn origin(&self, width: usize, height: usize, size: TermSize) -> (usize, usize) {
         let x = width.saturating_sub(size.columns * self.cell_w) / 2;
         let y = height.saturating_sub(size.screen_lines * self.cell_h) / 2;
         (x, y)
     }
 
-    /// False when the font has no glyph for `c` and would draw `.notdef` (tofu).
-    /// Coverage is not a usable signal here: `.notdef` is itself an inked box.
+    /// Coverage cannot answer this: `.notdef` is itself an inked box.
     pub fn has_glyph(&self, c: char) -> bool {
         self.font.lookup_glyph_index(c) != 0
     }
@@ -295,12 +281,10 @@ impl Renderer {
         }
     }
 
-    /// Clears the whole buffer to the background colour.
     pub fn clear(&self, buf: &mut [u32]) {
         buf.fill(self.bg);
     }
 
-    /// One pane filling the whole buffer.
     pub fn draw(
         &mut self,
         term: &Terminal,
@@ -313,9 +297,8 @@ impl Renderer {
         self.draw_into(term, buf, width, height, (0, 0, width, height), cursor_look);
     }
 
-    /// One pane inside `area` = `(x, y, w, h)` of the buffer. The caller clears
-    /// first: with several panes the buffer is shared and each one only owns its
-    /// rectangle.
+    /// The caller clears first: with several panes the buffer is shared and each
+    /// one owns only its own rectangle.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_into(
         &mut self,
@@ -392,9 +375,8 @@ impl Renderer {
                     std::mem::swap(&mut fg, &mut bg);
                 }
 
-                // A wide glyph owns this cell and the next, and painted both when
-                // its leading cell was reached. Touching the spacer here would
-                // repaint over the half already drawn.
+                // A wide glyph painted this cell and the next from its leading
+                // cell; repainting the spacer would cut the glyph in half.
                 if skip {
                     continue;
                 }
@@ -433,8 +415,6 @@ impl Renderer {
         look: CursorLook,
         color: u32,
     ) {
-        // Thin enough to sit beside the glyph rather than cover it, but never
-        // less than one pixel or it disappears at small sizes.
         let thickness = (self.cell_w / 8).clamp(1, 2);
         match look {
             CursorLook::Hidden | CursorLook::Block => {}
@@ -508,9 +488,8 @@ impl Renderer {
     }
 }
 
-/// One zoom step. Multiplicative so a step feels the same at any size, rounded
-/// to whole pixels so cell metrics stay crisp, and nudged so it always moves by
-/// at least one pixel (rounding would otherwise swallow small steps).
+/// Nudged by a pixel because rounding a 15% step can land on the same integer,
+/// which makes the key feel dead at small sizes.
 pub fn step_font_size(current: f32, steps: i32) -> f32 {
     if steps == 0 {
         return current;
@@ -561,9 +540,6 @@ fn fill_rect(
 mod tests {
     use super::*;
 
-    /// Any monospace face will do: these tests are about metrics and pixels,
-    /// not about a particular typeface. Kept as a search so layer 2 does not
-    /// hard-depend on one Windows install.
     const FONT_CANDIDATES: &[&str] = &[
         r"C:\Windows\Fonts\CascadiaMono.ttf",
         r"C:\Windows\Fonts\consola.ttf",
@@ -581,8 +557,8 @@ mod tests {
         panic!("no monospace font found; tried {FONT_CANDIDATES:?}");
     }
 
-    /// Distinct and non-zero everywhere, so a palette that was never installed
-    /// cannot pass for an installed one.
+    /// Non-zero everywhere, so a palette that was never installed cannot pass
+    /// for an installed one.
     fn test_palette() -> [u32; 256] {
         std::array::from_fn(|i| 0x0001_0000 | i as u32)
     }
@@ -591,8 +567,7 @@ mod tests {
         Renderer::new(&font_bytes(), 16.0, &test_palette()).unwrap()
     }
 
-    /// A size out of range used to abort the process inside fontdue, so this
-    /// has to rasterise, not just construct: NaN only dies at that point.
+    /// Has to rasterise, not just construct: NaN only dies at that point.
     #[test]
     fn a_hostile_font_size_still_renders() {
         let bytes = font_bytes();
@@ -637,7 +612,7 @@ mod tests {
     fn cells_are_not_degenerate() {
         let r = renderer();
         let (w, h) = r.cell_size();
-        assert!(w > 3 && h > 5, "celda sospechosa: {w}x{h}");
+        assert!(w > 3 && h > 5, "suspicious cell: {w}x{h}");
     }
 
     #[test]
@@ -662,7 +637,7 @@ mod tests {
         let first_cell_lit = (0..ch)
             .flat_map(|y| (0..cw).map(move |x| (x, y)))
             .any(|(x, y)| buf[y * w + x] != DEFAULT_BG);
-        assert!(first_cell_lit, "la celda 0 deberia tener pixeles de la X");
+        assert!(first_cell_lit, "cell 0 should hold pixels of the X");
     }
 
     #[test]
@@ -676,24 +651,21 @@ mod tests {
 
         // The cursor inverts its own cell, so only look outside it.
         let dirty = (ch..h).any(|y| (0..w).any(|x| buf[y * w + x] != DEFAULT_BG));
-        assert!(
-            !dirty,
-            "sin contenido no deberia pintarse nada fuera del cursor"
-        );
+        assert!(!dirty, "nothing but the cursor should be painted");
     }
 
     #[test]
     fn font_covers_what_a_terminal_needs() {
         let r = renderer();
         for c in "Aa1@#áéñüÇ┌─┐│└┘├┼█▀▄".chars() {
-            assert!(r.has_glyph(c), "falta el glifo {c:?}");
+            assert!(r.has_glyph(c), "missing glyph {c:?}");
         }
     }
 
     #[test]
     fn known_gap_no_font_fallback() {
-        // Cascadia Mono carries no CJK or emoji and there is no fallback font,
-        // so these draw as tofu. Delete this test when fallback lands.
+        // No fallback font yet, so these draw as tofu. Delete this test when
+        // fallback lands.
         let r = renderer();
         assert!(!r.has_glyph('中'));
         assert!(!r.has_glyph('😀'));
@@ -706,7 +678,6 @@ mod tests {
         let term = Terminal::new(TermSize::new(4, 2));
         let mut buf = vec![0u32; w * h];
         r.draw(&term, &mut buf, w, h, look);
-        // Columns of cell 0 holding any pixel other than the background.
         (0..cw)
             .filter(|&x| (0..ch).any(|y| buf[y * w + x] != DEFAULT_BG))
             .count()
@@ -716,12 +687,9 @@ mod tests {
     fn beam_cursor_is_a_thin_bar_not_a_block() {
         let (cw, _) = renderer().cell_size();
         let beam = painted_columns(CursorLook::Beam);
-        assert!(beam >= 1, "la barra no se pinto");
-        assert!(
-            beam <= 2,
-            "la barra ocupa {beam} columnas, deberia ser fina"
-        );
-        assert!(beam < cw, "la barra cubre toda la celda");
+        assert!(beam >= 1, "the bar was not painted");
+        assert!(beam <= 2, "the bar spans {beam} columns, it should be thin");
+        assert!(beam < cw, "the bar covers the whole cell");
     }
 
     #[test]
@@ -746,7 +714,7 @@ mod tests {
         let rows = (0..ch)
             .filter(|&y| (0..cw).any(|x| buf[y * w + x] != DEFAULT_BG))
             .count();
-        assert!(rows <= 2, "el subrayado ocupa {rows} filas");
+        assert!(rows <= 2, "the underline spans {rows} rows");
         assert_eq!(painted_columns(CursorLook::Underline), cw);
     }
 
@@ -761,7 +729,7 @@ mod tests {
         assert!(w1 > w0 && h1 > h0, "{w0}x{h0} -> {w1}x{h1}");
         assert!(
             r.grid_size(800, 600).columns < cols0,
-            "deberian entrar menos columnas"
+            "fewer columns should fit"
         );
     }
 
@@ -778,7 +746,6 @@ mod tests {
         let mut r = renderer();
         r.set_font_size(1000.0);
         assert_eq!(r.font_size(), MAX_FONT_PX);
-        // Already at the ceiling: asking for more changes nothing.
         assert!(!r.set_font_size(1000.0));
 
         r.set_font_size(0.1);
@@ -793,18 +760,16 @@ mod tests {
         let big = r.glyph('M').coverage.len();
         assert!(
             big > small,
-            "el glifo deberia rasterizarse mas grande: {small} -> {big}"
+            "the glyph should rasterise larger: {small} -> {big}"
         );
     }
 
     #[test]
     fn a_zoom_step_always_moves_at_least_one_pixel() {
-        // Rounding a 15% step can land back on the same integer at small sizes,
-        // which would make the key feel dead. Boundaries are excluded: there the
-        // clamp is supposed to stop the move.
+        // Boundaries are excluded: there the clamp is supposed to stop the move.
         for size in [7.0f32, 8.0, 10.0, 16.0, 24.0] {
-            assert!(step_font_size(size, 1) > size, "no subio desde {size}");
-            assert!(step_font_size(size, -1) < size, "no bajo desde {size}");
+            assert!(step_font_size(size, 1) > size, "did not rise from {size}");
+            assert!(step_font_size(size, -1) < size, "did not fall from {size}");
         }
     }
 
@@ -829,8 +794,6 @@ mod tests {
 
     #[test]
     fn a_wide_cell_keeps_both_halves() {
-        // The spacer cell used to repaint its own background after the leading
-        // cell had already drawn across both, cutting the glyph in half.
         let mut r = renderer();
         let (cw, ch) = r.cell_size();
         let (w, h) = (cw * 6, ch * 2);
@@ -844,17 +807,12 @@ mod tests {
 
         let lit =
             |col: usize| (0..ch).any(|y| (0..cw).any(|x| buf[y * w + col * cw + x] != DEFAULT_BG));
-        assert!(lit(0), "la celda guia deberia estar pintada");
-        assert!(
-            lit(1),
-            "la mitad derecha se borro: el espaciador la repinto"
-        );
+        assert!(lit(0), "the leading cell should be painted");
+        assert!(lit(1), "the right half was erased by the spacer");
     }
 
     #[test]
     fn the_outline_blends_every_border_pixel_exactly_once() {
-        // Blending is not idempotent: an edge written twice comes out brighter,
-        // so the four corners would read as dots.
         let r = renderer();
         let (width, height) = (40usize, 30usize);
         let (x, y, w, h) = (5usize, 4usize, 20usize, 15usize);
@@ -873,7 +831,6 @@ mod tests {
 
     #[test]
     fn the_outline_survives_a_rectangle_too_thin_to_have_an_inside() {
-        // A nearly collapsed pane previews as a one pixel band.
         let r = renderer();
         let mut buf = vec![0u32; 40 * 30];
         r.clear(&mut buf);
@@ -884,7 +841,6 @@ mod tests {
 
     #[test]
     fn draw_into_never_paints_outside_its_area() {
-        // The whole point of draw_into: a pane owns its rectangle and nothing else.
         let mut r = renderer();
         let (cw, ch) = r.cell_size();
         let (w, h) = (cw * 20, ch * 10);
@@ -892,7 +848,7 @@ mod tests {
 
         let mut term = Terminal::new(TermSize::new(40, 20));
         for i in 0..20 {
-            term.feed(format!("linea {i} llena de texto para desbordar\r\n").as_bytes());
+            term.feed(format!("line {i} full of text to overflow with\r\n").as_bytes());
         }
 
         let mut buf = vec![0u32; w * h];
