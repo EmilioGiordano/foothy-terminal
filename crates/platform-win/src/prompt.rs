@@ -470,41 +470,144 @@ mod tests {
     fn the_values_file_passes_the_check_the_prompt_makes_of_it() {
         for style in ChipStyle::ALL {
             let text = values_file(&Glyphs::pick(nerd), &test_chip(style));
-            assert!(text.ends_with('\n'), "{text:?}");
-            assert!(text.len() <= 4096, "{} bytes", text.len());
             assert!(!text.contains("${e}"), "an unresolved escape:\n{text:?}");
-            let mut found = Vec::new();
-            for line in text.lines() {
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                let (key, value) = line.split_once('=').expect("no key");
-                assert!(!key.is_empty());
-                assert!(sgr_only(value), "{key}: {value:?}");
-                found.push(key);
-            }
+            assert!(chip_file_accepted(&text), "rejected:\n{text:?}");
+            let found: Vec<&str> = text
+                .lines()
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(|l| l.split_once('=').expect("no key").0)
+                .collect();
             assert_eq!(found, KEYS);
         }
     }
 
+    const REFUSED: [(&str, &str); 16] = [
+        ("delete line", "\u{1b}[5M>"),
+        ("erase display", "\u{1b}[2J>"),
+        ("cursor position", "\u{1b}[1;1H>"),
+        ("device status report", "\u{1b}[6n>"),
+        ("hide the cursor", "\u{1b}[?25l>"),
+        ("osc", "\u{1b}]0;pwned\u{7}>"),
+        ("dcs", "\u{1b}Pq\u{1b}\\>"),
+        ("an unterminated csi", "\u{1b}[38;2;1"),
+        ("an escape with no bracket", "\u{1b}m>"),
+        ("a bare escape", "\u{1b}"),
+        ("c1 csi", "\u{9b}2J>"),
+        ("c1 osc", "\u{9d}0;pwned\u{9c}>"),
+        ("the top of the c1 range", "\u{9f}>"),
+        ("the bottom of the c1 range", "\u{80}>"),
+        ("the top of the c0 range", "\u{1f}>"),
+        ("delete", "\u{7f}>"),
+    ];
+
+    const TAKEN: [(&str, &str); 6] = [
+        ("an empty sgr", "\u{1b}[m>"),
+        ("a chained sgr", "\u{1b}[0;1;38;2;1;2;3m>\u{1b}[0m"),
+        ("plain text", "plain>"),
+        ("the last printable ascii", "\u{7e}>"),
+        ("the first printable above c1", "\u{a0}>"),
+        ("a glyph outside ascii", "\u{276f}"),
+    ];
+
+    #[test]
+    fn the_guard_refuses_everything_but_colour() {
+        for (what, value) in REFUSED {
+            assert!(!sgr_only(value), "{what}: {value:?} passed");
+            assert!(
+                !chip_file_accepted(&one_key_file(value)),
+                "{what}: {value:?} passed as a file"
+            );
+        }
+        for (what, value) in TAKEN {
+            assert!(sgr_only(value), "{what}: {value:?} refused");
+            assert!(
+                chip_file_accepted(&one_key_file(value)),
+                "{what}: {value:?} refused as a file"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_is_refused_unless_it_ends_on_a_newline_and_carries_every_key() {
+        assert!(chip_file_accepted(&one_key_file(">")));
+        assert!(!chip_file_accepted(
+            one_key_file(">").trim_end_matches('\n')
+        ));
+        assert!(!chip_file_accepted(""));
+        assert!(!chip_file_accepted("=novalue\n"));
+        assert!(!chip_file_accepted("justtext\n"));
+        assert!(!chip_file_accepted(
+            &one_key_file(">").replace("chevron", "bogus")
+        ));
+        let long = format!("{}#{}\n", one_key_file(">"), "x".repeat(4096));
+        assert!(!chip_file_accepted(&long));
+        // PowerShell's TrimEnd("`r") takes every trailing CR, not just one.
+        assert!(chip_file_accepted(
+            &one_key_file(">").replace('\n', "\r\r\n")
+        ));
+    }
+
+    fn one_key_file(chevron: &str) -> String {
+        let mut out = String::from("# comment\n");
+        for key in KEYS {
+            out.push_str(key);
+            out.push('=');
+            if key == "chevron" {
+                out.push_str(chevron);
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Mirrors `__footChipRead`. A rule that drifts from the PowerShell is a
+    /// hole in the guard the suite cannot see.
+    fn chip_file_accepted(text: &str) -> bool {
+        if text.is_empty() || text.len() > 4096 || !text.ends_with('\n') {
+            return false;
+        }
+        let mut found = Vec::new();
+        for line in text.split('\n') {
+            let line = line.trim_end_matches('\r');
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some(j) = line.find('=') else {
+                return false;
+            };
+            if j < 1 || !sgr_only(&line[j + 1..]) {
+                return false;
+            }
+            found.push(&line[..j]);
+        }
+        KEYS.iter().all(|k| found.contains(k))
+    }
+
+    /// Mirrors the regex in `__footChipRead`: `m` lower-case only, and nothing
+    /// from C0, DEL or C1.
     fn sgr_only(value: &str) -> bool {
         let mut rest = value;
-        while let Some(i) = rest.find('\u{1b}') {
-            if rest[..i].chars().any(|c| c.is_control() || c == '\u{7f}') {
-                return false;
+        while !rest.is_empty() {
+            if let Some(tail) = rest.strip_prefix('\u{1b}') {
+                let Some(tail) = tail.strip_prefix('[') else {
+                    return false;
+                };
+                let end = tail
+                    .find(|c: char| !matches!(c, '0'..='9' | ';'))
+                    .unwrap_or(tail.len());
+                if !tail[end..].starts_with('m') {
+                    return false;
+                }
+                rest = &tail[end + 1..];
+            } else {
+                let c = rest.chars().next().unwrap();
+                if matches!(c, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}') {
+                    return false;
+                }
+                rest = &rest[c.len_utf8()..];
             }
-            let Some(tail) = rest[i..].strip_prefix("\u{1b}[") else {
-                return false;
-            };
-            let Some(end) = tail.find(|c: char| !matches!(c, '0'..='9' | ';')) else {
-                return false;
-            };
-            if tail.as_bytes()[end] != b'm' {
-                return false;
-            }
-            rest = &tail[end + 1..];
         }
-        !rest.chars().any(|c| c.is_control() || c == '\u{7f}')
+        true
     }
 
     #[test]
