@@ -144,6 +144,14 @@ fn prompt_style_takes_surface_or_inverse() {
 }
 
 #[test]
+fn every_chip_style_parses_back_from_its_own_name() {
+    for style in config::ChipStyle::ALL {
+        let text = format!("prompt-style={}\n", style.name());
+        assert_eq!(clean(&text).settings.prompt_style, Some(style), "{text}");
+    }
+}
+
+#[test]
 fn paste_warning_uses_foots_boolean_vocabulary() {
     for yes in ["yes", "on", "true", "1", "YES"] {
         let p = clean(&format!("paste-warning={yes}\n"));
