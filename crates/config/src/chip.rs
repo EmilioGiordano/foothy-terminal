@@ -6,6 +6,18 @@ pub enum ChipStyle {
     Inverse,
 }
 
+impl ChipStyle {
+    pub const ALL: [ChipStyle; 2] = [ChipStyle::Surface, ChipStyle::Inverse];
+
+    /// Must stay a spelling `prompt-style` parses: state.ini is read back.
+    pub fn name(self) -> &'static str {
+        match self {
+            ChipStyle::Surface => "surface",
+            ChipStyle::Inverse => "inverse",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pill {
     Fill(u32),
