@@ -50,8 +50,6 @@ const CLOSE_HOVER: u32 = 0x00b3_4a4a;
 const CLOSE_GLYPHS: [char; 4] = ['×', '╳', '⨯', 'x'];
 const FOCUS_GLYPHS: [char; 3] = ['▍', '▌', '|'];
 
-/// The chip's colours are truecolor computed here, not palette indices the
-/// renderer could re-resolve, so this has to run again whenever the theme does.
 fn prompt_command(cfg: &config::Config, renderer: &Renderer) -> Option<String> {
     if !cfg.prompt {
         return None;
@@ -656,8 +654,8 @@ impl App {
         self.renderer
             .set_colors(cfg.colors.foreground, cfg.colors.background);
         self.renderer.set_palette(&cfg.colors.palette);
-        // The chip is printed, not drawn, so its colours freeze into the
-        // scrollback: only a pane opened after this sees the new theme.
+        // The chip's colours are baked into the script, so a theme change has
+        // to rebuild it; only a pane opened after this one sees the new one.
         self.panes.set_prompt(prompt_command(cfg, &self.renderer));
         if self.hwnd != 0 {
             chrome::set_dark_titlebar(self.hwnd as _, cfg.variant == config::Variant::Dark);

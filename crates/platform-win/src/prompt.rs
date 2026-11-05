@@ -72,9 +72,8 @@ fn ink(color: u32) -> String {
     format!("${{e}}[38;2;{}m", rgb(color))
 }
 
-/// Opens a pill: the left cap over the terminal background, then the fill, the
-/// icon, then the text colour. Under `Pill::Reverse` the cap is printed before
-/// `[7m`, or the swap would paint the cap's own shape in the background colour.
+/// Under `Pill::Reverse` the cap is printed before `[7m`, or the swap paints
+/// the cap's own shape in the background colour and hollows the end out.
 fn pill_open(
     g: &Glyphs,
     pill: Pill,
