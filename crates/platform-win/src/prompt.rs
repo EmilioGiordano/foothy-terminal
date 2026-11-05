@@ -131,7 +131,15 @@ function global:__footChipRead {
   # Sized before it is read: a huge file would stall every prompt.
   if (-not $i.Exists -or $i.Length -lt 1 -or $i.Length -gt 4096) { return $null }
   $t = $null
-  try { $t = [System.IO.File]::ReadAllText($f) } catch { return $null }
+  # Delete-sharing, or the app's rename over this file -- and its removal on
+  # exit -- fails while a prompt is reading it.
+  try {
+    $s = [System.IO.File]::Open($f, 'Open', 'Read', 'ReadWrite,Delete')
+    try {
+      $r = [System.IO.StreamReader]::new($s)
+      try { $t = $r.ReadToEnd() } finally { $r.Dispose() }
+    } finally { $s.Dispose() }
+  } catch { return $null }
   # The app may be renaming over this file while it is read, so a file that
   # does not end on a newline is a half-written one and gets no say.
   if (-not $t.EndsWith("`n")) { return $null }
