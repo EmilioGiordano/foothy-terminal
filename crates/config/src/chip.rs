@@ -72,6 +72,41 @@ pub fn chip_colors(colors: &Colors, style: ChipStyle) -> ChipColors {
     }
 }
 
+/// Outside the xterm 256-colour cube and its grey ramp, so no indexed colour
+/// can be converted into one of these by accident.
+pub const SENTINEL_PILL: u32 = 0x0001_02f0;
+pub const SENTINEL_PATH: u32 = 0x0001_02f1;
+pub const SENTINEL_FOLDER_ICON: u32 = 0x0001_02f2;
+pub const SENTINEL_BRANCH: u32 = 0x0001_02f3;
+pub const SENTINEL_BRANCH_ICON: u32 = 0x0001_02f4;
+
+pub const SENTINELS: [u32; 5] = [
+    SENTINEL_PILL,
+    SENTINEL_PATH,
+    SENTINEL_FOLDER_ICON,
+    SENTINEL_BRANCH,
+    SENTINEL_BRANCH_ICON,
+];
+
+/// What a terminal paints for each sentinel: `Pill::Reverse` swaps the default
+/// pair, and an unnamed ink is the background under that swap and the
+/// foreground over a fill.
+pub fn chip_aliases(colors: &Colors, style: ChipStyle) -> [(u32, u32); 5] {
+    let chip = chip_colors(colors, style);
+    let (pill, unnamed) = match chip.pill {
+        Pill::Fill(c) => (c, colors.foreground),
+        Pill::Reverse => (colors.foreground, colors.background),
+    };
+    let ink = |c: Option<u32>| c.unwrap_or(unnamed);
+    [
+        (SENTINEL_PILL, pill),
+        (SENTINEL_PATH, ink(chip.path)),
+        (SENTINEL_FOLDER_ICON, ink(chip.folder_icon)),
+        (SENTINEL_BRANCH, ink(chip.branch)),
+        (SENTINEL_BRANCH_ICON, ink(chip.branch_icon)),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,6 +166,72 @@ mod tests {
         assert_eq!(c.branch, None);
         assert_eq!(c.branch_icon, None);
         assert_eq!(c.chevron, 0x0022_2222);
+    }
+
+    #[test]
+    fn the_sentinels_are_the_values_the_chip_prints() {
+        // Changing one of these without changing the script that prints them
+        // leaves every chip on screen painted in near-black.
+        assert_eq!(
+            SENTINELS,
+            [
+                0x0001_02f0,
+                0x0001_02f1,
+                0x0001_02f2,
+                0x0001_02f3,
+                0x0001_02f4
+            ]
+        );
+    }
+
+    #[test]
+    fn no_sentinel_is_reachable_from_the_default_palette_or_the_cube() {
+        let cube = [0u32, 95, 135, 175, 215, 255];
+        for s in SENTINELS {
+            let channels = [(s >> 16) & 0xff, (s >> 8) & 0xff, s & 0xff];
+            assert!(
+                !channels.iter().all(|c| cube.contains(c)),
+                "{s:#08x} is in the 6x6x6 cube"
+            );
+            assert!(
+                !(channels[0] == channels[1] && channels[1] == channels[2]),
+                "{s:#08x} is on the grey ramp"
+            );
+            assert!(
+                !crate::default_palette().contains(&s),
+                "{s:#08x} is a default palette entry"
+            );
+        }
+    }
+
+    #[test]
+    fn the_aliases_name_every_sentinel_once() {
+        for style in ChipStyle::ALL {
+            let pairs = chip_aliases(&Config::default().colors, style);
+            let keys: Vec<u32> = pairs.iter().map(|(k, _)| *k).collect();
+            assert_eq!(keys, SENTINELS, "{style:?}");
+        }
+    }
+
+    #[test]
+    fn surface_resolves_the_sentinels_to_the_fill_and_its_inks() {
+        let c = colors(0x00ff_ffff, 0x0000_0000);
+        let pairs = chip_aliases(&c, ChipStyle::Surface);
+        assert_eq!(pairs[0].1, mix(0x0000_0000, 0x00ff_ffff, SURFACE_LIFT));
+        assert_eq!(pairs[1].1, 0x00ff_ffff);
+        assert_eq!(pairs[2].1, c.palette[6]);
+        assert_eq!(pairs[3].1, mix(0x00ff_ffff, 0x0000_0000, BRANCH_FADE));
+        assert_eq!(pairs[4].1, c.palette[5]);
+    }
+
+    #[test]
+    fn inverse_resolves_the_pill_to_the_foreground_and_every_ink_to_the_background() {
+        let c = colors(0x00ff_ffff, 0x0000_0000);
+        let pairs = chip_aliases(&c, ChipStyle::Inverse);
+        assert_eq!(pairs[0].1, 0x00ff_ffff);
+        for (_, real) in &pairs[1..] {
+            assert_eq!(*real, 0x0000_0000);
+        }
     }
 
     #[test]
