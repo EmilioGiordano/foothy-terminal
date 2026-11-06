@@ -990,8 +990,6 @@ mod tests {
             r.resolve(Color::Spec(Rgb { r: 1, g: 2, b: 241 }), DEFAULT_FG),
             0x0001_02f1
         );
-        // The chevron is `ESC[36m`, which arrives as a named colour, not an
-        // indexed one; aliasing must leave both forms on the palette.
         assert_eq!(r.resolve(Color::Indexed(6), DEFAULT_FG), test_palette()[6]);
         assert_eq!(
             r.resolve(Color::Named(NamedColor::Cyan), DEFAULT_FG),

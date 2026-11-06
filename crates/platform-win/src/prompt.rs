@@ -442,10 +442,8 @@ mod tests {
 
     #[test]
     fn every_fragment_prints_the_sentinel_of_the_role_its_key_names() {
-        // The bug: one sentinel on the wrong fragment paints the path in the
-        // faded branch ink and makes `path-off` close the branch pill, with
-        // every other test still green. `path-off` and `branch-off` are the
-        // same bytes, so only these two fragments can be told apart.
+        // A sentinel on the wrong fragment paints the path in the faded branch
+        // ink and turns `path-on` in the chip file into the branch pill.
         let g = Glyphs::pick(nerd);
         let f = fragments(&g);
         let at = |key: &str| KEYS.iter().position(|k| *k == key).expect("no such key");
