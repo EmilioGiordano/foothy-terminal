@@ -50,8 +50,6 @@ fn painted(chip: &ChipColors, colors: &Colors) -> (u32, [(&'static str, u32); 4]
     )
 }
 
-/// The same four inks and the pill, read out of the alias table the renderer
-/// is handed.
 fn aliased(colors: &Colors, style: ChipStyle) -> (u32, [(&'static str, u32); 4]) {
     let table = chip_aliases(colors, style);
     let of = |key: u32| {
@@ -192,9 +190,6 @@ fn the_chip_contrast_floors_over_every_bundled_theme() {
     println!();
 }
 
-/// The alias table is what the screen shows now, so a sentinel resolving to
-/// anything but what the old explicit colours painted is a silent recolour of
-/// every theme at once.
 #[test]
 fn the_alias_table_resolves_to_what_the_chip_used_to_print() {
     for p in &pairs() {

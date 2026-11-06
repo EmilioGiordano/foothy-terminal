@@ -72,8 +72,8 @@ pub fn chip_colors(colors: &Colors, style: ChipStyle) -> ChipColors {
     }
 }
 
-/// Outside the xterm 256-colour cube and its grey ramp, so no indexed colour
-/// can be converted into one of these by accident.
+/// A sentinel has to be a value no program is likely to print: anything that
+/// emits it as truecolor gets repainted in a chip colour.
 pub const SENTINEL_PILL: u32 = 0x0001_02f0;
 pub const SENTINEL_PATH: u32 = 0x0001_02f1;
 pub const SENTINEL_FOLDER_ICON: u32 = 0x0001_02f2;
@@ -88,9 +88,6 @@ pub const SENTINELS: [u32; 5] = [
     SENTINEL_BRANCH_ICON,
 ];
 
-/// What a terminal paints for each sentinel: `Pill::Reverse` swaps the default
-/// pair, and an unnamed ink is the background under that swap and the
-/// foreground over a fill.
 pub fn chip_aliases(colors: &Colors, style: ChipStyle) -> [(u32, u32); 5] {
     let chip = chip_colors(colors, style);
     let (pill, unnamed) = match chip.pill {
