@@ -55,10 +55,8 @@ fn prompt_command(cfg: &config::Config, renderer: &Renderer) -> Option<String> {
         return None;
     }
     let glyphs = prompt::Glyphs::pick(|c| renderer.has_glyph(c));
-    let colors = config::chip_colors(&cfg.colors, cfg.prompt_style);
     Some(prompt::encoded_command(&prompt::script(
         &glyphs,
-        &colors,
         Some(&config_file::chip_path()),
     )))
 }
@@ -68,8 +66,7 @@ fn chip_values(cfg: &config::Config, renderer: &Renderer) -> Option<String> {
         return None;
     }
     let glyphs = prompt::Glyphs::pick(|c| renderer.has_glyph(c));
-    let colors = config::chip_colors(&cfg.colors, cfg.prompt_style);
-    Some(prompt::values_file(&glyphs, &colors))
+    Some(prompt::values_file(&glyphs))
 }
 
 // The palette clips a note to the overlay width, so the path and the error go
@@ -341,6 +338,7 @@ impl App {
         let mut renderer = build_renderer(cfg.font.as_deref(), cfg.font_size, &cfg.colors.palette)?;
         renderer.set_padding(cfg.pad as usize);
         renderer.set_colors(cfg.colors.foreground, cfg.colors.background);
+        renderer.set_color_aliases(&config::chip_aliases(&cfg.colors, cfg.prompt_style));
         let header_h = renderer.header_height();
         let cell_w = renderer.cell_size().0;
         let pick = |candidates: &[char], fallback: char| {
@@ -694,8 +692,10 @@ impl App {
         self.renderer
             .set_colors(cfg.colors.foreground, cfg.colors.background);
         self.renderer.set_palette(&cfg.colors.palette);
-        // The values baked into the script are what a pane that cannot read
-        // the chip file falls back to, so a theme change has to rebuild them.
+        // What recolours a chip already on screen, scrollback included: the
+        // bytes it printed name sentinels, never a real colour.
+        self.renderer
+            .set_color_aliases(&config::chip_aliases(&cfg.colors, cfg.prompt_style));
         self.panes.set_prompt(prompt_command(cfg, &self.renderer));
         if self.hwnd != 0 {
             chrome::set_dark_titlebar(self.hwnd as _, cfg.variant == config::Variant::Dark);
