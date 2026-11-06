@@ -2,7 +2,10 @@ mod chip;
 mod ini;
 mod theme;
 
-pub use chip::{ChipColors, ChipStyle, Pill, chip_colors, mix};
+pub use chip::{
+    ChipColors, ChipStyle, Pill, SENTINEL_BRANCH, SENTINEL_BRANCH_ICON, SENTINEL_FOLDER_ICON,
+    SENTINEL_PATH, SENTINEL_PILL, SENTINELS, chip_aliases, chip_colors, mix,
+};
 pub use ini::{Problem, parse};
 pub use theme::{bundled, bundled_names};
 
