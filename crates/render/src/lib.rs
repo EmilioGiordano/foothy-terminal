@@ -134,8 +134,6 @@ impl Renderer {
         self.palette = *palette;
     }
 
-    /// Substitutions applied to a truecolor value only: an indexed or named
-    /// colour already follows the palette.
     pub fn set_color_aliases(&mut self, aliases: &[(u32, u32)]) {
         self.aliases.clear();
         self.aliases.extend_from_slice(aliases);

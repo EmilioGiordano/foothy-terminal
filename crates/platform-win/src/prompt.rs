@@ -230,9 +230,6 @@ function global:prompt {
 
 pub const KEYS: [&str; 5] = ["path-on", "path-off", "branch-on", "branch-off", "chevron"];
 
-/// Every colour is a sentinel the renderer substitutes per frame, so a chip
-/// already on screen follows the theme and the style. The chevron needs none:
-/// an indexed colour is resolved per frame already.
 fn fragments(g: &Glyphs) -> [String; 5] {
     [
         pill_open(g, g.folder, SENTINEL_FOLDER_ICON, SENTINEL_PATH),
@@ -641,16 +638,15 @@ mod tests {
             buf[(ch / 2) * w + cw + cw / 2]
         };
 
-        for style in ChipStyle::ALL {
+        // Surface lifts the pill off the background; inverse paints it in the
+        // foreground.
+        for (style, want) in [
+            (ChipStyle::Surface, 0x0032_454e),
+            (ChipStyle::Inverse, 0x00dc_ecf5),
+        ] {
             r.set_color_aliases(&config::chip_aliases(&test_colors(), style));
-            let want = config::chip_aliases(&test_colors(), style)[0].1;
             assert_eq!(inside(&mut r), want, "{style:?}");
         }
-        assert_ne!(
-            config::chip_aliases(&test_colors(), ChipStyle::Surface)[0].1,
-            config::chip_aliases(&test_colors(), ChipStyle::Inverse)[0].1,
-            "the two styles would pass this test painted the same"
-        );
     }
 
     #[test]

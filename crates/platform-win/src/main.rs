@@ -692,8 +692,7 @@ impl App {
         self.renderer
             .set_colors(cfg.colors.foreground, cfg.colors.background);
         self.renderer.set_palette(&cfg.colors.palette);
-        // What recolours a chip already on screen, scrollback included: the
-        // bytes it printed name sentinels, never a real colour.
+        // Without this the chip paints its sentinels raw.
         self.renderer
             .set_color_aliases(&config::chip_aliases(&cfg.colors, cfg.prompt_style));
         self.panes.set_prompt(prompt_command(cfg, &self.renderer));

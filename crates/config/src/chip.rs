@@ -170,8 +170,6 @@ mod tests {
 
     #[test]
     fn the_sentinels_are_the_values_the_chip_prints() {
-        // Changing one of these without changing the script that prints them
-        // leaves every chip on screen painted in near-black.
         assert_eq!(
             SENTINELS,
             [
