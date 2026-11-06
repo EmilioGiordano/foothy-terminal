@@ -695,7 +695,6 @@ impl App {
         // Without this the chip paints its sentinels raw.
         self.renderer
             .set_color_aliases(&config::chip_aliases(&cfg.colors, cfg.prompt_style));
-        self.panes.set_prompt(prompt_command(cfg, &self.renderer));
         if self.hwnd != 0 {
             chrome::set_dark_titlebar(self.hwnd as _, cfg.variant == config::Variant::Dark);
         }
