@@ -1,6 +1,8 @@
+mod chip;
 mod ini;
 mod theme;
 
+pub use chip::{ChipColors, ChipStyle, Pill, chip_colors, mix};
 pub use ini::{Problem, parse};
 pub use theme::{bundled, bundled_names};
 
@@ -105,6 +107,8 @@ pub struct Settings {
     pub alpha: Option<u8>,
     pub blink: Option<Blink>,
     pub paste_warning: Option<bool>,
+    pub prompt: Option<bool>,
+    pub prompt_style: Option<ChipStyle>,
     pub theme: Option<String>,
     pub initial_variant: Option<Variant>,
 }
@@ -118,6 +122,8 @@ impl Settings {
             alpha: over.alpha.or(base.alpha),
             blink: over.blink.or(base.blink),
             paste_warning: over.paste_warning.or(base.paste_warning),
+            prompt: over.prompt.or(base.prompt),
+            prompt_style: over.prompt_style.or(base.prompt_style),
             theme: over.theme.or(base.theme),
             initial_variant: over.initial_variant.or(base.initial_variant),
         }
@@ -152,6 +158,7 @@ fn from_theme(theme: Partial) -> Partial {
     Partial {
         settings: Settings {
             initial_variant: theme.settings.initial_variant,
+            prompt_style: theme.settings.prompt_style,
             ..Default::default()
         },
         dark: theme.dark,
@@ -198,6 +205,8 @@ pub struct Config {
     pub alpha: u8,
     pub blink: Blink,
     pub paste_warning: bool,
+    pub prompt: bool,
+    pub prompt_style: ChipStyle,
     pub variant: Variant,
     pub colors: Colors,
 }
@@ -249,6 +258,8 @@ impl Default for Config {
             alpha: DEFAULT_ALPHA,
             blink: Blink::System,
             paste_warning: true,
+            prompt: true,
+            prompt_style: ChipStyle::Surface,
             variant: Variant::Dark,
             colors: Colors {
                 foreground: DEFAULT_FOREGROUND,
@@ -299,6 +310,8 @@ impl Partial {
             alpha: self.settings.alpha.unwrap_or(d.alpha),
             blink: self.settings.blink.unwrap_or(d.blink),
             paste_warning: self.settings.paste_warning.unwrap_or(d.paste_warning),
+            prompt: self.settings.prompt.unwrap_or(d.prompt),
+            prompt_style: self.settings.prompt_style.unwrap_or(d.prompt_style),
             variant,
             colors: Colors {
                 foreground: c.foreground.unwrap_or(d.colors.foreground),

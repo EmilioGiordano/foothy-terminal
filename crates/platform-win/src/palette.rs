@@ -1,9 +1,10 @@
-use config::Variant;
+use config::{ChipStyle, Variant};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Commands,
     Themes,
+    Styles,
 }
 
 impl Mode {
@@ -11,7 +12,7 @@ impl Mode {
     pub fn parent(self) -> Option<Mode> {
         match self {
             Mode::Commands => None,
-            Mode::Themes => Some(Mode::Commands),
+            Mode::Themes | Mode::Styles => Some(Mode::Commands),
         }
     }
 }
@@ -19,6 +20,7 @@ impl Mode {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     SelectTheme,
+    SelectPromptStyle,
     SplitRight,
     SplitDown,
     ClosePane,
@@ -36,6 +38,7 @@ impl Action {
     fn opens(self) -> Option<Mode> {
         match self {
             Action::SelectTheme => Some(Mode::Themes),
+            Action::SelectPromptStyle => Some(Mode::Styles),
             Action::SplitRight
             | Action::SplitDown
             | Action::ClosePane
@@ -99,8 +102,9 @@ pub struct Row<'a> {
     pub theme: Option<usize>,
 }
 
-const COMMANDS: [(Action, &str, &str); 10] = [
+const COMMANDS: [(Action, &str, &str); 11] = [
     (Action::SelectTheme, "Select theme...", ""),
+    (Action::SelectPromptStyle, "Select prompt style...", ""),
     (Action::SplitRight, "Split right", "Ctrl+Shift+Right"),
     (Action::SplitDown, "Split down", "Ctrl+Shift+Down"),
     (Action::ClosePane, "Close pane", "Ctrl+Shift+W"),
@@ -112,6 +116,15 @@ const COMMANDS: [(Action, &str, &str); 10] = [
     (Action::ScrollToTop, "Scroll to top", "Shift+Home"),
 ];
 
+const STYLES: [(ChipStyle, &str, &str); 2] = [
+    (ChipStyle::Surface, "Surface", "pill"),
+    (ChipStyle::Inverse, "Inverse", "reverse"),
+];
+
+pub fn style(i: usize) -> Option<ChipStyle> {
+    STYLES.get(i).map(|s| s.0)
+}
+
 pub struct Palette {
     mode: Mode,
     filter: String,
@@ -119,18 +132,24 @@ pub struct Palette {
     sel: usize,
     themes: Vec<ThemeEntry>,
     current: Option<String>,
+    current_style: ChipStyle,
     matches: Vec<usize>,
     mode_changed: bool,
 }
 
 impl Palette {
-    pub fn commands(themes: Vec<ThemeEntry>, current: Option<&str>) -> Self {
+    pub fn commands(
+        themes: Vec<ThemeEntry>,
+        current: Option<&str>,
+        current_style: ChipStyle,
+    ) -> Self {
         let mut p = Self {
             mode: Mode::Commands,
             filter: String::new(),
             sel: 0,
             themes,
             current: current.map(str::to_string),
+            current_style,
             matches: Vec::new(),
             mode_changed: false,
         };
@@ -154,6 +173,10 @@ impl Palette {
     /// abandoned.
     pub fn set_current(&mut self, name: &str) {
         self.current = Some(name.to_string());
+    }
+
+    pub fn set_current_style(&mut self, style: ChipStyle) {
+        self.current_style = style;
     }
 
     pub fn key(&mut self, key: Key) -> Outcome {
@@ -254,6 +277,12 @@ impl Palette {
                 selected,
                 theme: Some(i),
             },
+            Mode::Styles => Row {
+                label: STYLES[i].1,
+                tag: STYLES[i].2,
+                selected,
+                theme: None,
+            },
         }
     }
 
@@ -261,6 +290,7 @@ impl Palette {
         match self.mode {
             Mode::Commands => COMMANDS[i].1,
             Mode::Themes => &self.themes[i].name,
+            Mode::Styles => STYLES[i].1,
         }
     }
 
@@ -269,6 +299,7 @@ impl Palette {
         let total = match self.mode {
             Mode::Commands => COMMANDS.len(),
             Mode::Themes => self.themes.len(),
+            Mode::Styles => STYLES.len(),
         };
         self.matches = (0..total)
             .filter(|&i| needle.is_empty() || self.label(i).to_lowercase().contains(&needle))
@@ -282,6 +313,16 @@ impl Palette {
                 .matches
                 .iter()
                 .position(|&i| self.themes[i].name == *name)
+        {
+            self.sel = pos;
+        }
+    }
+
+    fn select_current_style(&mut self) {
+        if let Some(pos) = self
+            .matches
+            .iter()
+            .position(|&i| STYLES[i].0 == self.current_style)
         {
             self.sel = pos;
         }
@@ -309,7 +350,7 @@ impl Palette {
             return Outcome::Stay;
         };
         match self.mode {
-            Mode::Themes => Outcome::Commit(i),
+            Mode::Themes | Mode::Styles => Outcome::Commit(i),
             Mode::Commands => {
                 let action = COMMANDS[i].0;
                 match action.opens() {
@@ -327,6 +368,7 @@ impl Palette {
         // `select_current` reads `self.themes`, so it belongs to one mode only.
         match sub {
             Mode::Themes => self.select_current(),
+            Mode::Styles => self.select_current_style(),
             Mode::Commands => {}
         }
         self.moved()
@@ -355,13 +397,13 @@ impl Palette {
     fn opener(&self, i: usize) -> Option<Mode> {
         match self.mode {
             Mode::Commands => COMMANDS[i].0.opens(),
-            Mode::Themes => None,
+            Mode::Themes | Mode::Styles => None,
         }
     }
 
     fn moved(&self) -> Outcome {
         match (self.mode, self.matches.get(self.sel)) {
-            (Mode::Themes, Some(&i)) => Outcome::Preview(i),
+            (Mode::Themes | Mode::Styles, Some(&i)) => Outcome::Preview(i),
             _ => Outcome::Stay,
         }
     }
@@ -370,6 +412,10 @@ impl Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn commands(entries: Vec<ThemeEntry>, current: Option<&str>) -> Palette {
+        Palette::commands(entries, current, ChipStyle::Surface)
+    }
 
     fn entries(names: &[&str]) -> Vec<ThemeEntry> {
         names
@@ -387,9 +433,17 @@ mod tests {
     }
 
     fn themes(entries: Vec<ThemeEntry>, current: Option<&str>) -> Palette {
-        let mut p = Palette::commands(entries, current);
+        let mut p = commands(entries, current);
         p.key(Key::Enter);
         assert_eq!(p.mode(), Mode::Themes);
+        p
+    }
+
+    fn styles(current: ChipStyle) -> Palette {
+        let mut p = Palette::commands(many(3), None, current);
+        type_str(&mut p, "prompt style");
+        p.key(Key::Enter);
+        assert_eq!(p.mode(), Mode::Styles);
         p
     }
 
@@ -413,16 +467,17 @@ mod tests {
 
     #[test]
     fn the_command_list_starts_with_select_theme() {
-        let p = Palette::commands(many(3), None);
+        let p = commands(many(3), None);
         let rows = p.visible(50);
         assert_eq!(rows[0].label, "Select theme...");
+        assert_eq!(rows[1].label, "Select prompt style...");
         assert_eq!(rows.len(), COMMANDS.len());
         assert!(rows[0].selected);
     }
 
     #[test]
     fn a_filter_narrows_and_clearing_it_restores_the_full_list() {
-        let mut p = Palette::commands(many(3), None);
+        let mut p = commands(many(3), None);
         type_str(&mut p, "spl");
         assert_eq!(labels(&p, 50), ["Split right", "Split down"]);
         assert_eq!(p.filter(), "spl");
@@ -435,7 +490,7 @@ mod tests {
 
     #[test]
     fn a_control_character_never_reaches_the_filter() {
-        let mut p = Palette::commands(many(3), None);
+        let mut p = commands(many(3), None);
         type_str(&mut p, "zoom");
         assert_eq!(p.key(Key::Char('\u{1}')), Outcome::Stay);
         assert_eq!(p.filter(), "zoom");
@@ -443,7 +498,7 @@ mod tests {
 
     #[test]
     fn the_filter_ignores_case() {
-        let mut p = Palette::commands(many(3), None);
+        let mut p = commands(many(3), None);
         type_str(&mut p, "ZOOM");
         assert_eq!(labels(&p, 50), ["Zoom in", "Zoom out", "Reset zoom"]);
     }
@@ -550,7 +605,7 @@ mod tests {
 
     #[test]
     fn enter_on_a_command_runs_it() {
-        let mut p = Palette::commands(many(3), None);
+        let mut p = commands(many(3), None);
         type_str(&mut p, "close");
         assert_eq!(p.key(Key::Enter), Outcome::Run(Action::ClosePane));
         assert_eq!(p.mode(), Mode::Commands);
@@ -558,7 +613,7 @@ mod tests {
 
     #[test]
     fn enter_on_select_theme_switches_mode_and_drops_the_filter() {
-        let mut p = Palette::commands(entries(&["one", "two", "three"]), Some("two"));
+        let mut p = commands(entries(&["one", "two", "three"]), Some("two"));
         type_str(&mut p, "theme");
         assert_eq!(p.key(Key::Enter), Outcome::Preview(1));
         assert_eq!(p.mode(), Mode::Themes);
@@ -614,7 +669,7 @@ mod tests {
 
     #[test]
     fn esc_cancels_the_command_list() {
-        let mut p = Palette::commands(many(3), None);
+        let mut p = commands(many(3), None);
         assert_eq!(p.key(Key::Esc), Outcome::Cancel);
     }
 
@@ -645,7 +700,7 @@ mod tests {
 
         let mut reached = vec![Mode::Commands];
         for (i, sub) in openers {
-            let mut p = Palette::commands(many(40), None);
+            let mut p = commands(many(40), None);
             for _ in 0..i {
                 p.key(Key::Down);
             }
@@ -669,7 +724,7 @@ mod tests {
 
     #[test]
     fn only_a_mode_change_is_flagged_to_the_caller() {
-        let mut p = Palette::commands(many(40), None);
+        let mut p = commands(many(40), None);
         assert!(!p.take_mode_change());
         type_str(&mut p, "co");
         p.key(Key::Down);
@@ -692,7 +747,7 @@ mod tests {
             .collect();
         assert!(!openers.is_empty());
         for i in openers {
-            let mut p = Palette::commands(many(40), None);
+            let mut p = commands(many(40), None);
             for _ in 0..i {
                 p.key(Key::Down);
             }
@@ -708,7 +763,7 @@ mod tests {
 
     #[test]
     fn a_filter_typed_in_the_theme_list_does_not_survive_the_step_back() {
-        let mut p = Palette::commands(many(40), None);
+        let mut p = commands(many(40), None);
         type_str(&mut p, "theme");
         p.key(Key::Enter);
         type_str(&mut p, "theme-1");
@@ -726,8 +781,78 @@ mod tests {
     }
 
     #[test]
+    fn every_chip_style_is_offered_once_and_maps_back() {
+        assert_eq!(STYLES.len(), ChipStyle::ALL.len());
+        for want in ChipStyle::ALL {
+            let i = STYLES.iter().position(|s| s.0 == want).unwrap();
+            assert_eq!(style(i), Some(want));
+        }
+        assert_eq!(style(STYLES.len()), None);
+    }
+
+    #[test]
+    fn enter_on_select_prompt_style_lists_the_two_styles() {
+        let p = styles(ChipStyle::Surface);
+        assert_eq!(p.filter(), "");
+        assert_eq!(labels(&p, 50), ["Surface", "Inverse"]);
+        let view = p.visible(50);
+        assert_eq!(view[0].tag, "pill");
+        assert_eq!(view[1].tag, "reverse");
+        assert!(view.iter().all(|r| r.theme.is_none()));
+    }
+
+    #[test]
+    fn opening_the_style_list_selects_the_configured_style() {
+        for want in ChipStyle::ALL {
+            let p = styles(want);
+            let sel = p.visible(50).iter().find(|r| r.selected).copied().unwrap();
+            let i = STYLES.iter().position(|s| s.0 == want).unwrap();
+            assert_eq!(sel.label, STYLES[i].1);
+        }
+    }
+
+    #[test]
+    fn moving_in_the_style_list_previews_and_enter_commits() {
+        let mut p = styles(ChipStyle::Surface);
+        assert_eq!(p.key(Key::Down), Outcome::Preview(1));
+        assert_eq!(p.key(Key::Enter), Outcome::Commit(1));
+        assert_eq!(style(1), Some(ChipStyle::Inverse));
+    }
+
+    #[test]
+    fn esc_in_the_style_list_steps_back_to_the_commands() {
+        let mut p = styles(ChipStyle::Surface);
+        p.key(Key::Down);
+        assert_eq!(p.key(Key::Esc), Outcome::Restore);
+        assert_eq!(p.mode(), Mode::Commands);
+        assert_eq!(p.filter(), "");
+        assert_eq!(
+            p.visible(50).iter().find(|r| r.selected).unwrap().label,
+            "Select prompt style..."
+        );
+        assert_eq!(p.key(Key::Esc), Outcome::Cancel);
+    }
+
+    #[test]
+    fn a_committed_style_the_caller_keeps_is_the_one_reopened() {
+        let mut p = styles(ChipStyle::Surface);
+        p.key(Key::Down);
+        assert_eq!(p.key(Key::Enter), Outcome::Commit(1));
+        p.set_current_style(ChipStyle::Inverse);
+        assert_eq!(p.key(Key::Esc), Outcome::Restore);
+        assert_eq!(p.key(Key::Enter), Outcome::Preview(1));
+        assert_eq!(
+            p.visible(50).iter().find(|r| r.selected).unwrap().label,
+            "Inverse"
+        );
+    }
+
+    #[test]
     fn every_label_and_tag_is_ascii() {
         for (_, label, tag) in COMMANDS {
+            assert!(label.is_ascii() && tag.is_ascii(), "{label}");
+        }
+        for (_, label, tag) in STYLES {
             assert!(label.is_ascii() && tag.is_ascii(), "{label}");
         }
     }

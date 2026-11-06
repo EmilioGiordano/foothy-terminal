@@ -159,6 +159,7 @@ fn look(cfg: &Config) -> Look {
 fn footer(mode: Mode) -> &'static str {
     match (mode, mode.parent().is_some()) {
         (Mode::Themes, true) => "Enter: keep   Esc: back   Up/Down: preview",
+        (Mode::Styles, true) => "Enter: keep   Esc: back   Applies at the next prompt",
         (_, true) => "Enter: choose   Esc: back   Type to filter",
         (_, false) => "Enter: run   Esc: close   Type to filter",
     }
@@ -168,6 +169,7 @@ fn prompt(mode: Mode) -> &'static str {
     match mode {
         Mode::Commands => "Command> ",
         Mode::Themes => "Theme> ",
+        Mode::Styles => "Style> ",
     }
 }
 
@@ -322,8 +324,12 @@ mod tests {
     }
 
     fn every_tag() -> Vec<String> {
-        let p = Palette::commands(Vec::new(), None);
+        let mut p = Palette::commands(Vec::new(), None, config::ChipStyle::Surface);
         let mut tags: Vec<String> = p.visible(50).iter().map(|r| r.tag.to_string()).collect();
+        p.key(crate::palette::Key::Down);
+        p.key(crate::palette::Key::Enter);
+        assert_eq!(p.mode(), Mode::Styles);
+        tags.extend(p.visible(50).iter().map(|r| r.tag.to_string()));
         tags.push("dark".to_string());
         tags.push("light".to_string());
         tags
@@ -371,10 +377,33 @@ mod tests {
 
     #[test]
     fn every_string_the_palette_draws_is_ascii() {
-        for mode in [Mode::Commands, Mode::Themes] {
+        for mode in MODES {
             assert!(footer(mode).is_ascii());
             assert!(prompt(mode).is_ascii());
         }
+    }
+
+    const MODES: [Mode; 3] = [Mode::Commands, Mode::Themes, Mode::Styles];
+
+    #[test]
+    fn a_sub_list_offers_the_way_back_and_the_root_offers_the_way_out() {
+        for mode in MODES {
+            let hint = footer(mode);
+            if mode.parent().is_some() {
+                assert!(hint.contains("Esc: back"), "{mode:?}: {hint}");
+            } else {
+                assert!(hint.contains("Esc: close"), "{mode:?}: {hint}");
+            }
+        }
+        assert!(footer(Mode::Styles).contains("next prompt"));
+    }
+
+    #[test]
+    fn every_mode_has_its_own_prompt() {
+        let mut seen: Vec<&str> = MODES.iter().map(|m| prompt(*m)).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), MODES.len());
     }
 
     #[test]
@@ -409,7 +438,7 @@ mod tests {
 
         for win in [(w, h), (300, 240), (80, 60), (1, 1)] {
             let mut buf = vec![0u32; win.0 * win.1];
-            let mut p = Palette::commands(list.entries.clone(), Some("nord"));
+            let mut p = Palette::commands(list.entries.clone(), Some("nord"), cfg.prompt_style);
             draw(&mut r, &mut buf, win, &p, &list, &cfg, &[]);
             p.key(crate::palette::Key::Enter);
             for _ in 0..90 {
@@ -440,7 +469,11 @@ mod tests {
         let (list, _) = ThemeList::build();
         let (w, h) = (1000usize, 620usize);
         let mut buf = vec![0u32; w * h];
-        let mut p = Palette::commands(list.entries.clone(), Some("nord"));
+        let mut p = Palette::commands(
+            list.entries.clone(),
+            Some("nord"),
+            config::ChipStyle::Surface,
+        );
         p.key(crate::palette::Key::Enter);
         let i = list
             .entries
@@ -453,6 +486,7 @@ mod tests {
         r.clear(&mut buf);
         let notes = config_file::Pins {
             theme_file: true,
+            style_file: true,
             env_fg: true,
             env_bg: true,
         }

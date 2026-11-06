@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
@@ -35,6 +36,12 @@ pub const DEFAULT_BG: u32 = 0x0024_2424;
 fn rgb(r: u8, g: u8, b: u8) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | b as u32
 }
+
+mod builtin;
+
+/// Codepoints the renderer draws itself when the font lacks them. Callers
+/// choosing glyphs can rely on these being drawable whatever font is loaded.
+pub use builtin::BUILTIN as SYNTHESISED_GLYPHS;
 
 struct Glyph {
     width: usize,
@@ -243,7 +250,7 @@ impl Renderer {
 
     /// Coverage cannot answer this: `.notdef` is itself an inked box.
     pub fn has_glyph(&self, c: char) -> bool {
-        self.font.lookup_glyph_index(c) != 0
+        self.font.lookup_glyph_index(c) != 0 || builtin::has(c)
     }
 
     pub fn grid_size(&self, width_px: usize, height_px: usize) -> TermSize {
@@ -256,16 +263,38 @@ impl Renderer {
     }
 
     fn glyph(&mut self, c: char) -> &Glyph {
-        self.glyphs.entry(c).or_insert_with(|| {
-            let (m, coverage) = self.font.rasterize(c, self.px);
-            Glyph {
-                width: m.width,
-                height: m.height,
-                left: m.xmin,
-                top: m.height as i32 + m.ymin,
-                coverage,
+        let (cell_w, cell_h, baseline) = (self.cell_w, self.cell_h, self.baseline);
+        let (font, px) = (&self.font, self.px);
+        // Everything costly stays in the vacant arm: this runs once per cell per
+        // frame, and a cache hit must not pay for a font lookup.
+        match self.glyphs.entry(c) {
+            Entry::Occupied(hit) => hit.into_mut(),
+            Entry::Vacant(slot) => {
+                let glyph = if font.lookup_glyph_index(c) == 0
+                    && let Some(coverage) = builtin::coverage(c, cell_w, cell_h)
+                {
+                    // The blit offsets by `baseline - top`, so this lands the
+                    // sprite on the cell origin and lets it fill the cell.
+                    Glyph {
+                        width: cell_w,
+                        height: cell_h,
+                        left: 0,
+                        top: baseline,
+                        coverage,
+                    }
+                } else {
+                    let (m, coverage) = font.rasterize(c, px);
+                    Glyph {
+                        width: m.width,
+                        height: m.height,
+                        left: m.xmin,
+                        top: m.height as i32 + m.ymin,
+                        coverage,
+                    }
+                };
+                slot.insert(glyph)
             }
-        })
+        }
     }
 
     fn resolve(&self, color: Color, default: u32) -> u32 {
@@ -912,6 +941,28 @@ mod tests {
 
         let beyond = (0..ch).any(|y| (limit..w).any(|x| buf[y * w + x] != DEFAULT_BG));
         assert!(!beyond, "draw_text wrote past max_w");
+    }
+
+    #[test]
+    fn reverse_video_fills_the_cell_with_the_foreground_and_follows_a_theme() {
+        // The inverse prompt chip is spaces under SGR 7: it is a slab only if
+        // the swap resolves the default pair, and it does so every frame.
+        let mut r = renderer();
+        r.set_colors(0x00dc_ecf5, 0x0016_2a33);
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        let mut term = Terminal::new(TermSize::new(4, 2));
+        term.feed(b"\x1b[7m  ");
+
+        let slab = |r: &mut Renderer| {
+            let mut buf = vec![0u32; w * h];
+            r.clear(&mut buf);
+            r.draw(&term, &mut buf, w, h, CursorLook::Hidden);
+            buf[(ch / 2) * w + cw + cw / 2]
+        };
+        assert_eq!(slab(&mut r), 0x00dc_ecf5);
+        r.set_colors(0x0000_0000, 0x00ff_ffff);
+        assert_eq!(slab(&mut r), 0x0000_0000);
     }
 
     #[test]

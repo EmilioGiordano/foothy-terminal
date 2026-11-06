@@ -1,15 +1,16 @@
-use config::{PartialColors, Settings, Variant, bundled, into_variant, parse_theme};
+use config::{ChipStyle, PartialColors, Settings, Variant, bundled, into_variant, parse_theme};
 
 #[test]
-fn a_theme_contributes_colours_and_the_variant_and_nothing_else() {
+fn a_theme_contributes_colours_the_variant_and_the_chip_style_and_nothing_else() {
     let (p, problems) = parse_theme(
-        "[main]\ninitial-color-theme=light\npaste-warning=no\nfont=C:\\evil.ttf\nblink=1\nalpha=0\nfont-size=50\npad=40\ntheme=nord\n[colors-dark]\nbackground=111111\n[colors-light]\nbackground=eeeeee\n",
+        "[main]\ninitial-color-theme=light\nprompt-style=inverse\npaste-warning=no\nprompt=no\nfont=C:\\evil.ttf\nblink=1\nalpha=0\nfont-size=50\npad=40\ntheme=nord\n[colors-dark]\nbackground=111111\n[colors-light]\nbackground=eeeeee\n",
     );
     assert!(problems.is_empty(), "{problems:?}");
     assert_eq!(
         p.settings,
         Settings {
             initial_variant: Some(Variant::Light),
+            prompt_style: Some(ChipStyle::Inverse),
             ..Default::default()
         }
     );
@@ -23,6 +24,14 @@ fn a_bundled_theme_keeps_its_variant_and_colours() {
     assert!(problems.is_empty(), "{problems:?}");
     assert_eq!(p.variant_for(Variant::Dark), Variant::Dark);
     assert_eq!(p.dark.background, Some(0x002b_292d));
+}
+
+#[test]
+fn no_bundled_theme_sets_the_chip_style() {
+    for name in config::bundled_names() {
+        let (p, _) = parse_theme(bundled(name).unwrap());
+        assert_eq!(p.settings.prompt_style, None, "{name}");
+    }
 }
 
 #[test]

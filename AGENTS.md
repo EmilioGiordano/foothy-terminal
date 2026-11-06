@@ -168,9 +168,17 @@ cargo run -p vt-core --bin spike -- "dir"        # pump a command, dump the grid
 cargo run -p platform-win --bin keytest -- win32 # what actually reaches PSReadLine
 cargo run -p render --example coverage           # which glyphs the font has
 cargo run --release -p vt-core --example pane_cost -- 12   # the docs/02 §7 metric
+cargo run -p vt-core --example prompt_probe -- p.ps1  # run a prompt script under ConPTY
 ```
 
 **Never run `foot-win`** from an agent: it opens a window and steals focus. `cargo run -p platform-win` with no `--bin` is `foot-win`, so always name the binary. `keytest` and `spike` are headless and fine.
+
+Rust tests cannot tell whether the PowerShell in `platform-win/src/prompt.rs` is valid. `dump_the_script` writes it out and `prompt_probe` runs it for real:
+
+```sh
+FOOTWIN_DUMP=p.ps1 cargo test -p platform-win dump_the_script -- --ignored
+cargo run -p vt-core --example prompt_probe -- p.ps1
+```
 
 ## Configuration
 
@@ -178,9 +186,13 @@ cargo run --release -p vt-core --example pane_cost -- 12   # the docs/02 §7 met
 
 Precedence, lowest to highest: `defaults < theme < state.ini < foothy.ini < FOOTWIN_*`.
 
-**The app never writes `foothy.ini`.** Only `state.ini` is its own. A theme file may contribute colours and the light/dark variant, nothing else — it is text people copy from the internet.
+**The app never writes `foothy.ini`.** Its own file is `state.ini`, shared by every window, which records the user's picks and survives a restart.
 
-Runtime tuning, no rebuild: `FOOTWIN_FONT`, `FOOTWIN_FONT_PX`, `FOOTWIN_PAD`, `FOOTWIN_FG`, `FOOTWIN_BG`, `FOOTWIN_ALPHA`, `FOOTWIN_BLINK`, `FOOTWIN_PASTE_WARN`.
+The PowerShell prompt reads its colours from `%TEMP%\foothy\chip-<pid>.conf`: per-process scratch, not configuration. It is derived from the resolved config *and the window's own font* — the chip glyphs are chosen by what that font actually has — so it cannot be shared with a window that may be running another font. Each window writes it at startup and on every commit, and removes it when it exits.
+
+A theme file may contribute colours, the light/dark variant and `prompt-style`, nothing else — it is text people copy from the internet. `prompt-style` is on that list because the chip is part of a theme's look; every other key a theme file carries is dropped.
+
+Runtime tuning, no rebuild: `FOOTWIN_FONT`, `FOOTWIN_FONT_PX`, `FOOTWIN_PAD`, `FOOTWIN_FG`, `FOOTWIN_BG`, `FOOTWIN_ALPHA`, `FOOTWIN_BLINK`, `FOOTWIN_PASTE_WARN`, `FOOTWIN_PROMPT` (`0` keeps the shell's own prompt).
 
 ## Architecture: the layer rule
 

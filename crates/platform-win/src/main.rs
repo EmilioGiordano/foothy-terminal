@@ -8,6 +8,7 @@ mod config_file;
 mod overlay;
 mod palette;
 mod panes;
+mod prompt;
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -48,6 +49,46 @@ const CLOSE_HOVER: u32 = 0x00b3_4a4a;
 /// Picked at runtime: a font without the glyph draws tofu instead.
 const CLOSE_GLYPHS: [char; 4] = ['×', '╳', '⨯', 'x'];
 const FOCUS_GLYPHS: [char; 3] = ['▍', '▌', '|'];
+
+fn prompt_command(cfg: &config::Config, renderer: &Renderer) -> Option<String> {
+    if !cfg.prompt {
+        return None;
+    }
+    let glyphs = prompt::Glyphs::pick(|c| renderer.has_glyph(c));
+    let colors = config::chip_colors(&cfg.colors, cfg.prompt_style);
+    Some(prompt::encoded_command(&prompt::script(
+        &glyphs,
+        &colors,
+        Some(&config_file::chip_path()),
+    )))
+}
+
+fn chip_values(cfg: &config::Config, renderer: &Renderer) -> Option<String> {
+    if !cfg.prompt {
+        return None;
+    }
+    let glyphs = prompt::Glyphs::pick(|c| renderer.has_glyph(c));
+    let colors = config::chip_colors(&cfg.colors, cfg.prompt_style);
+    Some(prompt::values_file(&glyphs, &colors))
+}
+
+// The palette clips a note to the overlay width, so the path and the error go
+// to stderr and the note stays short.
+const CHIP_NOTE: &str = "Could not save the prompt chip: it keeps the colours it has.";
+
+fn state_note() -> String {
+    format!(
+        "Could not save {}: the pick applies to this session only.",
+        config_file::STATE_FILE
+    )
+}
+
+fn log_chip_failure(e: &std::io::Error) {
+    eprintln!(
+        "foothy: could not write {}: {e}",
+        config_file::chip_path().display()
+    );
+}
 
 fn preview(text: &str) -> String {
     let first = text.lines().next().unwrap_or("").trim();
@@ -253,6 +294,7 @@ struct App {
     files: config::Partial,
     pins: config_file::Pins,
     current_theme: Option<String>,
+    state: config_file::State,
     /// ~86 theme files: built on the first open and kept, so opening the
     /// palette stays bounded work (docs/02 §3 rule 7).
     themes: Option<overlay::ThemeList>,
@@ -267,8 +309,9 @@ struct Opened {
     palette: palette::Palette,
     /// Restored by Esc, including the titlebar variant.
     saved: config::Config,
-    /// Last previewed theme, so a repeated index does not repaint.
-    shown: Option<usize>,
+    /// Last previewed row, so a repeated index does not repaint. Keyed by
+    /// mode: two lists number their rows from zero.
+    shown: Option<(palette::Mode, usize)>,
 }
 
 /// A file that exists is not a font, so both the read and the parse fall back.
@@ -293,6 +336,7 @@ impl App {
         }
         let cfg = loaded.config;
         let current_theme = loaded.files.settings.theme.clone();
+        let state = loaded.state.clone();
 
         let mut renderer = build_renderer(cfg.font.as_deref(), cfg.font_size, &cfg.colors.palette)?;
         renderer.set_padding(cfg.pad as usize);
@@ -308,13 +352,20 @@ impl App {
         };
         let close_glyph = pick(&CLOSE_GLYPHS, 'x');
         let focus_glyph = pick(&FOCUS_GLYPHS, '|');
+
+        let mut panes = Panes::new(header_h, cell_w);
+        panes.set_prompt(prompt_command(&cfg, &renderer));
+        if let Some(e) = chip_values(&cfg, &renderer).and_then(|t| config_file::save_chip(&t).err())
+        {
+            log_chip_failure(&e);
+        }
         Ok(Self {
             proxy,
             window: None,
             surface: None,
             _context: None,
             renderer,
-            panes: Panes::new(header_h, cell_w),
+            panes,
             mods: Mods::default(),
             size: TermSize::new(100, 30),
             dirty: true,
@@ -341,6 +392,7 @@ impl App {
             files: loaded.files,
             pins: loaded.pins,
             current_theme,
+            state,
             themes: None,
             open: None,
             status: None,
@@ -622,9 +674,10 @@ impl App {
         self.status = None;
 
         let current = self.current_theme.clone();
+        let style = self.cfg.prompt_style;
         let entries = self.theme_list().entries.clone();
         self.open = Some(Opened {
-            palette: palette::Palette::commands(entries, current.as_deref()),
+            palette: palette::Palette::commands(entries, current.as_deref(), style),
             saved: self.cfg.clone(),
             shown: None,
         });
@@ -641,6 +694,9 @@ impl App {
         self.renderer
             .set_colors(cfg.colors.foreground, cfg.colors.background);
         self.renderer.set_palette(&cfg.colors.palette);
+        // The values baked into the script are what a pane that cannot read
+        // the chip file falls back to, so a theme change has to rebuild them.
+        self.panes.set_prompt(prompt_command(cfg, &self.renderer));
         if self.hwnd != 0 {
             chrome::set_dark_titlebar(self.hwnd as _, cfg.variant == config::Variant::Dark);
         }
@@ -655,7 +711,14 @@ impl App {
         self.cfg = cfg;
     }
 
-    /// Clearing `shown` is part of it: left set, re-entering the theme list on
+    fn show_style(&mut self, style: config::ChipStyle) {
+        let mut cfg = self.cfg.clone();
+        cfg.prompt_style = style;
+        self.apply_look(&cfg);
+        self.cfg = cfg;
+    }
+
+    /// `shown` has to be cleared here: left set, re-entering the theme list on
     /// the same index would be taken for a repeat and skip the repaint.
     fn restore_look(&mut self) {
         let Some(open) = self.open.as_mut() else {
@@ -710,41 +773,44 @@ impl App {
         match outcome {
             palette::Outcome::Stay => self.redraw_soon(),
             palette::Outcome::Preview(i) => {
+                let Some(mode) = self.open.as_ref().map(|o| o.palette.mode()) else {
+                    return;
+                };
                 // Backspace on an empty filter and the wheel at its clamp both
                 // repeat the index; repainting the window for that is waste.
-                let repeat = self.open.as_ref().is_some_and(|o| o.shown == Some(i));
+                let repeat = self
+                    .open
+                    .as_ref()
+                    .is_some_and(|o| o.shown == Some((mode, i)));
                 if !repeat {
                     if let Some(open) = self.open.as_mut() {
-                        open.shown = Some(i);
+                        open.shown = Some((mode, i));
                     }
-                    self.show_theme(i);
+                    match mode {
+                        palette::Mode::Themes => self.show_theme(i),
+                        palette::Mode::Styles => {
+                            if let Some(style) = palette::style(i) {
+                                self.show_style(style);
+                            }
+                        }
+                        palette::Mode::Commands => {}
+                    }
                 }
                 self.redraw_soon();
             }
             palette::Outcome::Commit(i) => {
-                let name = self.themes.as_ref().map(|l| l.entries[i].name.clone());
-                self.show_theme(i);
-                let mut failed = false;
-                if let Some(name) = name {
-                    self.current_theme = Some(name.clone());
-                    self.status = match config_file::save_theme(&name) {
-                        Ok(()) => None,
-                        Err(e) => {
-                            eprintln!("foothy: could not write {}: {e}", config_file::STATE_FILE);
-                            failed = true;
-                            Some(format!(
-                                "Could not save {}: the theme applies to this session only.",
-                                config_file::STATE_FILE
-                            ))
-                        }
-                    };
-                }
+                let failed = match self.open.as_ref().map(|o| o.palette.mode()) {
+                    Some(palette::Mode::Themes) => self.commit_theme(i),
+                    Some(palette::Mode::Styles) => self.commit_style(i),
+                    Some(palette::Mode::Commands) | None => false,
+                };
                 if failed {
                     // The notice is drawn inside the palette and nowhere else,
                     // so a failed save keeps it open to be read. Esc must then
                     // keep the pick, or the notice becomes a lie.
                     if let Some(open) = self.open.as_mut() {
                         open.saved = self.cfg.clone();
+                        open.palette.set_current_style(self.cfg.prompt_style);
                         if let Some(name) = &self.current_theme {
                             open.palette.set_current(name);
                         }
@@ -792,10 +858,71 @@ impl App {
         }
     }
 
+    fn commit_theme(&mut self, i: usize) -> bool {
+        let Some(name) = self.themes.as_ref().map(|l| l.entries[i].name.clone()) else {
+            return false;
+        };
+        self.show_theme(i);
+        let chip = self.save_chip();
+        self.current_theme = Some(name.clone());
+        self.state.theme = Some(name);
+        let failed = self.save_state(config_file::Field::Theme);
+        failed | self.note_chip(chip)
+    }
+
+    fn commit_style(&mut self, i: usize) -> bool {
+        let Some(style) = palette::style(i) else {
+            return false;
+        };
+        self.show_style(style);
+        let chip = self.save_chip();
+        // Also into `files`: a later theme preview re-composes from it and
+        // would otherwise bring the old style back.
+        self.files.settings.prompt_style = Some(style);
+        self.state.prompt_style = Some(style);
+        let failed = self.save_state(config_file::Field::PromptStyle);
+        failed | self.note_chip(chip)
+    }
+
+    // Commits only: written from a preview, the file would outlive Esc.
+    fn save_chip(&self) -> std::io::Result<()> {
+        match chip_values(&self.cfg, &self.renderer) {
+            Some(text) => config_file::save_chip(&text),
+            None => Ok(()),
+        }
+    }
+
+    fn note_chip(&mut self, out: std::io::Result<()>) -> bool {
+        match out {
+            Ok(()) => false,
+            Err(e) => {
+                log_chip_failure(&e);
+                if self.status.is_none() {
+                    self.status = Some(CHIP_NOTE.to_string());
+                }
+                true
+            }
+        }
+    }
+
+    fn save_state(&mut self, field: config_file::Field) -> bool {
+        match config_file::save_state(&self.state, field) {
+            Ok(()) => {
+                self.status = None;
+                false
+            }
+            Err(e) => {
+                eprintln!("foothy: could not write {}: {e}", config_file::STATE_FILE);
+                self.status = Some(state_note());
+                true
+            }
+        }
+    }
+
     fn run_action(&mut self, action: palette::Action, event_loop: &ActiveEventLoop) {
         match action {
             // The state machine answers this one by switching mode.
-            palette::Action::SelectTheme => {}
+            palette::Action::SelectTheme | palette::Action::SelectPromptStyle => {}
             palette::Action::SplitRight => self.split(DropZone::Right),
             palette::Action::SplitDown => self.split(DropZone::Bottom),
             palette::Action::ClosePane => self.close_focused(event_loop),
@@ -845,8 +972,10 @@ impl App {
         if let Some(status) = self.status.clone() {
             notes.push(status);
         }
-        if mode == palette::Mode::Themes {
-            notes.extend(self.pins.notes());
+        match mode {
+            palette::Mode::Themes => notes.extend(self.pins.notes()),
+            palette::Mode::Styles => notes.extend(self.pins.style_notes()),
+            palette::Mode::Commands => {}
         }
         notes
     }
@@ -1557,7 +1686,9 @@ fn main() -> anyhow::Result<()> {
     let event_loop = EventLoop::<()>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App::new(event_loop.create_proxy())?;
-    event_loop.run_app(&mut app)?;
+    let out = event_loop.run_app(&mut app);
+    config_file::remove_chip();
+    out?;
     Ok(())
 }
 
