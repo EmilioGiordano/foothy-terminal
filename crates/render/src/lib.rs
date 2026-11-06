@@ -62,6 +62,7 @@ pub struct Renderer {
     pad: usize,
     fg: u32,
     bg: u32,
+    aliases: Vec<(u32, u32)>,
 }
 
 impl Renderer {
@@ -90,6 +91,7 @@ impl Renderer {
             pad: 0,
             fg: DEFAULT_FG,
             bg: DEFAULT_BG,
+            aliases: Vec::new(),
         })
     }
 
@@ -130,6 +132,11 @@ impl Renderer {
 
     pub fn set_palette(&mut self, palette: &[u32; 256]) {
         self.palette = *palette;
+    }
+
+    pub fn set_color_aliases(&mut self, aliases: &[(u32, u32)]) {
+        self.aliases.clear();
+        self.aliases.extend_from_slice(aliases);
     }
 
     pub fn header_height(&self) -> usize {
@@ -299,7 +306,13 @@ impl Renderer {
 
     fn resolve(&self, color: Color, default: u32) -> u32 {
         match color {
-            Color::Spec(Rgb { r, g, b }) => rgb(r, g, b),
+            Color::Spec(Rgb { r, g, b }) => {
+                let c = rgb(r, g, b);
+                self.aliases
+                    .iter()
+                    .find(|(from, _)| *from == c)
+                    .map_or(c, |(_, to)| *to)
+            }
             Color::Indexed(i) => self.palette[i as usize],
             Color::Named(NamedColor::Foreground) => self.fg,
             Color::Named(NamedColor::Background) => self.bg,
@@ -945,8 +958,8 @@ mod tests {
 
     #[test]
     fn reverse_video_fills_the_cell_with_the_foreground_and_follows_a_theme() {
-        // The inverse prompt chip is spaces under SGR 7: it is a slab only if
-        // the swap resolves the default pair, and it does so every frame.
+        // A swapped pair is a slab only if it resolves the default pair, and
+        // it has to do so every frame or it stops following the theme.
         let mut r = renderer();
         r.set_colors(0x00dc_ecf5, 0x0016_2a33);
         let (cw, ch) = r.cell_size();
@@ -963,6 +976,66 @@ mod tests {
         assert_eq!(slab(&mut r), 0x00dc_ecf5);
         r.set_colors(0x0000_0000, 0x00ff_ffff);
         assert_eq!(slab(&mut r), 0x0000_0000);
+    }
+
+    #[test]
+    fn an_alias_substitutes_a_truecolor_value_and_leaves_the_rest_alone() {
+        let mut r = renderer();
+        r.set_color_aliases(&[(0x0001_02f0, 0x0012_3456)]);
+        assert_eq!(
+            r.resolve(Color::Spec(Rgb { r: 1, g: 2, b: 240 }), DEFAULT_FG),
+            0x0012_3456
+        );
+        assert_eq!(
+            r.resolve(Color::Spec(Rgb { r: 1, g: 2, b: 241 }), DEFAULT_FG),
+            0x0001_02f1
+        );
+        assert_eq!(r.resolve(Color::Indexed(6), DEFAULT_FG), test_palette()[6]);
+        assert_eq!(
+            r.resolve(Color::Named(NamedColor::Cyan), DEFAULT_FG),
+            test_palette()[6]
+        );
+    }
+
+    #[test]
+    fn the_chevrons_sgr_36_lands_on_the_palette_not_on_the_foreground() {
+        // `ESC[36m` parses to a named colour, never to `Indexed(6)`, and the
+        // two only agree while `Named(n)` resolves through the palette.
+        let mut r = renderer();
+        r.set_colors(0x00dc_ecf5, 0x0016_2a33);
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        let mut term = Terminal::new(TermSize::new(4, 2));
+        // Reversed, so the cyan ink becomes a slab no glyph covers.
+        term.feed(b"\x1b[36;7m  ");
+        let mut buf = vec![0u32; w * h];
+        r.clear(&mut buf);
+        r.draw(&term, &mut buf, w, h, CursorLook::Hidden);
+        assert_eq!(buf[(ch / 2) * w + cw + cw / 2], test_palette()[6]);
+    }
+
+    #[test]
+    fn a_new_alias_table_repaints_a_cell_already_on_screen() {
+        // The bug this guards: colours baked into bytes already drawn cannot
+        // follow a theme, so the substitution has to happen per frame.
+        let mut r = renderer();
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        let mut term = Terminal::new(TermSize::new(4, 2));
+        term.feed(b"\x1b[48;2;1;2;240m  ");
+
+        let slab = |r: &mut Renderer| {
+            let mut buf = vec![0u32; w * h];
+            r.clear(&mut buf);
+            r.draw(&term, &mut buf, w, h, CursorLook::Hidden);
+            buf[(ch / 2) * w + cw + cw / 2]
+        };
+        r.set_color_aliases(&[(0x0001_02f0, 0x0012_3456)]);
+        assert_eq!(slab(&mut r), 0x0012_3456);
+        r.set_color_aliases(&[(0x0001_02f0, 0x00ab_cdef)]);
+        assert_eq!(slab(&mut r), 0x00ab_cdef);
+        r.set_color_aliases(&[]);
+        assert_eq!(slab(&mut r), 0x0001_02f0);
     }
 
     #[test]

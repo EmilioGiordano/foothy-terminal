@@ -7,8 +7,9 @@
 //! ```
 
 use config::{
-    ChipColors, ChipStyle, Colors, Partial, PartialColors, Settings, Variant, bundled,
-    bundled_names, chip_colors, parse_theme,
+    ChipColors, ChipStyle, Colors, Partial, PartialColors, SENTINEL_BRANCH, SENTINEL_BRANCH_ICON,
+    SENTINEL_FOLDER_ICON, SENTINEL_PATH, SENTINEL_PILL, Settings, Variant, bundled, bundled_names,
+    chip_aliases, chip_colors, parse_theme,
 };
 
 fn luminance(color: u32) -> f64 {
@@ -45,6 +46,26 @@ fn painted(chip: &ChipColors, colors: &Colors) -> (u32, [(&'static str, u32); 4]
             ("branch", ink(chip.branch)),
             ("folder icon", ink(chip.folder_icon)),
             ("branch icon", ink(chip.branch_icon)),
+        ],
+    )
+}
+
+fn aliased(colors: &Colors, style: ChipStyle) -> (u32, [(&'static str, u32); 4]) {
+    let table = chip_aliases(colors, style);
+    let of = |key: u32| {
+        table
+            .iter()
+            .find(|(k, _)| *k == key)
+            .expect("no such sentinel")
+            .1
+    };
+    (
+        of(SENTINEL_PILL),
+        [
+            ("path", of(SENTINEL_PATH)),
+            ("branch", of(SENTINEL_BRANCH)),
+            ("folder icon", of(SENTINEL_FOLDER_ICON)),
+            ("branch icon", of(SENTINEL_BRANCH_ICON)),
         ],
     )
 }
@@ -140,7 +161,7 @@ fn the_chip_contrast_floors_over_every_bundled_theme() {
         let mut labels = ["", "", "", ""];
         for p in &pairs {
             let chip = chip_colors(&p.colors, style);
-            let (fill, painted_inks) = painted(&chip, &p.colors);
+            let (fill, painted_inks) = aliased(&p.colors, style);
             pill.see(contrast(fill, p.colors.background), &p.name);
             for (i, (what, color)) in painted_inks.into_iter().enumerate() {
                 labels[i] = what;
@@ -167,6 +188,21 @@ fn the_chip_contrast_floors_over_every_bundled_theme() {
         );
     }
     println!();
+}
+
+#[test]
+fn the_alias_table_resolves_to_what_the_chip_used_to_print() {
+    for p in &pairs() {
+        for style in [ChipStyle::Surface, ChipStyle::Inverse] {
+            let chip = chip_colors(&p.colors, style);
+            assert_eq!(
+                aliased(&p.colors, style),
+                painted(&chip, &p.colors),
+                "{} {style:?}",
+                p.name
+            );
+        }
+    }
 }
 
 #[test]
