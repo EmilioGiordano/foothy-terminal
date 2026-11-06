@@ -441,6 +441,30 @@ mod tests {
     }
 
     #[test]
+    fn every_fragment_prints_the_sentinel_of_the_role_its_key_names() {
+        // The bug: one sentinel on the wrong fragment paints the path in the
+        // faded branch ink and makes `path-off` close the branch pill, with
+        // every other test still green. `path-off` and `branch-off` are the
+        // same bytes, so only these two fragments can be told apart.
+        let g = Glyphs::pick(nerd);
+        let f = fragments(&g);
+        let at = |key: &str| KEYS.iter().position(|k| *k == key).expect("no such key");
+        for (key, icon, text) in [
+            ("path-on", "[38;2;1;2;242m", "[38;2;1;2;241m"),
+            ("branch-on", "[38;2;1;2;244m", "[38;2;1;2;243m"),
+        ] {
+            let s = &f[at(key)];
+            let i = s
+                .find(icon)
+                .unwrap_or_else(|| panic!("{key}: no {icon} in {s:?}"));
+            let t = s
+                .find(text)
+                .unwrap_or_else(|| panic!("{key}: no {text} in {s:?}"));
+            assert!(i < t, "{key}: the text ink comes before the icon in {s:?}");
+        }
+    }
+
+    #[test]
     fn the_pill_sentinel_is_both_the_cap_ink_and_the_fill() {
         let g = Glyphs::pick(nerd);
         let s = script(&g, None);
