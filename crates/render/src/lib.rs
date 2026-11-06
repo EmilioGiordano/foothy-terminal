@@ -990,7 +990,30 @@ mod tests {
             r.resolve(Color::Spec(Rgb { r: 1, g: 2, b: 241 }), DEFAULT_FG),
             0x0001_02f1
         );
+        // The chevron is `ESC[36m`, which arrives as a named colour, not an
+        // indexed one; aliasing must leave both forms on the palette.
         assert_eq!(r.resolve(Color::Indexed(6), DEFAULT_FG), test_palette()[6]);
+        assert_eq!(
+            r.resolve(Color::Named(NamedColor::Cyan), DEFAULT_FG),
+            test_palette()[6]
+        );
+    }
+
+    #[test]
+    fn the_chevrons_sgr_36_lands_on_the_palette_not_on_the_foreground() {
+        // `ESC[36m` parses to a named colour, never to `Indexed(6)`, and the
+        // two only agree while `Named(n)` resolves through the palette.
+        let mut r = renderer();
+        r.set_colors(0x00dc_ecf5, 0x0016_2a33);
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        let mut term = Terminal::new(TermSize::new(4, 2));
+        // Reversed, so the cyan ink becomes a slab no glyph covers.
+        term.feed(b"\x1b[36;7m  ");
+        let mut buf = vec![0u32; w * h];
+        r.clear(&mut buf);
+        r.draw(&term, &mut buf, w, h, CursorLook::Hidden);
+        assert_eq!(buf[(ch / 2) * w + cw + cw / 2], test_palette()[6]);
     }
 
     #[test]
