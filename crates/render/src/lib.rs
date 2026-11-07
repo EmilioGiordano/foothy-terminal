@@ -43,7 +43,7 @@ mod builtin;
 /// choosing glyphs can rely on these being drawable whatever font is loaded.
 pub use builtin::BUILTIN as SYNTHESISED_GLYPHS;
 
-/// foot's default `dim-amount=1.5` as a blend weight: `render.c:283` computes
+/// foot's default `dim-amount=1.5` as a blend weight: `render.c:282` computes
 /// `t = 1 - 1/amount`.
 const DIM_ALPHA: u8 = 170;
 
@@ -58,7 +58,6 @@ const STYLED: Flags = Flags::BOLD
 const STYLE_BOLD: u8 = 1;
 const STYLE_ITALIC: u8 = 2;
 
-/// About 11 degrees, the slant a real oblique face carries.
 const ITALIC_SHEAR: f32 = 0.2;
 
 fn style_bits(flags: Flags) -> u8 {
@@ -84,10 +83,9 @@ fn is_line_art(c: char) -> bool {
     matches!(c, '\u{2500}'..='\u{259f}' | '\u{e0b0}'..='\u{e0d4}')
 }
 
-/// The single face is emboldened by smearing the coverage to the right and
-/// slanted by shearing it about the baseline. The result is clipped to the cell
-/// the glyph already occupied: `blit` overwrites instead of blending, so ink
-/// reaching left would punch a hole in the neighbour that is already drawn.
+/// Clipped to the cell the glyph already occupied: `blit` overwrites instead of
+/// blending, so ink reaching left would punch a hole in the neighbour that is
+/// already drawn, and ink reaching right would leave the pane.
 fn restyle(g: &Glyph, style: u8, px: f32, cell_w: usize) -> Glyph {
     let dilate = if style & STYLE_BOLD != 0 {
         (px / 16.0).round().max(1.0) as i32
@@ -1439,7 +1437,8 @@ mod tests {
         let (cw, ch) = r.cell_size();
         let (w, h) = (cw * 4, ch * 2);
         let mut term = Terminal::new(TermSize::new(4, 2));
-        term.feed(b"\x1b[2m");
+        // The space carries the attribute; the return parks the cursor on it.
+        term.feed(b"\x1b[2m \r");
 
         let mut buf = vec![0u32; w * h];
         r.clear(&mut buf);
