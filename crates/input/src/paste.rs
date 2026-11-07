@@ -8,19 +8,17 @@ pub const LARGE_PASTE: usize = 4096;
 pub enum Risk {
     /// Nothing to ask about.
     Safe,
-    /// Carries line breaks and the program did not ask for bracketed paste, so
-    /// the shell will run each line as it arrives.
-    WouldExecute { lines: usize },
+    /// Carries line breaks. `bracketed` is whether the running program asked
+    /// for bracketed paste, which only changes how the confirmation reads.
+    MultiLine { lines: usize, bracketed: bool },
     /// Big enough that the user cannot have read all of it.
     Large { bytes: usize },
 }
 
-/// `bracketed` is whether the running program enabled bracketed paste, which is
-/// how it promises to treat the text as data instead of as typed commands.
 pub fn assess(text: &str, bracketed: bool) -> Risk {
     let lines = line_count(text);
-    if lines > 1 && !bracketed {
-        return Risk::WouldExecute { lines };
+    if lines > 1 {
+        return Risk::MultiLine { lines, bracketed };
     }
     if text.len() > LARGE_PASTE {
         return Risk::Large { bytes: text.len() };
@@ -85,14 +83,22 @@ mod tests {
     fn multiline_without_bracketed_would_execute() {
         assert_eq!(
             assess("one\ntwo\nthree", false),
-            Risk::WouldExecute { lines: 3 }
+            Risk::MultiLine {
+                lines: 3,
+                bracketed: false
+            }
         );
     }
 
     #[test]
-    fn bracketed_paste_makes_multiline_safe() {
-        // The program promised to treat it as data, so nagging would be noise.
-        assert_eq!(assess("one\ntwo\nthree", true), Risk::Safe);
+    fn bracketed_paste_still_asks_about_line_breaks() {
+        assert_eq!(
+            assess("one\ntwo\nthree", true),
+            Risk::MultiLine {
+                lines: 3,
+                bracketed: true
+            }
+        );
     }
 
     #[test]
@@ -100,8 +106,9 @@ mod tests {
         // "rm -rf /\n" runs on arrival: the newline is the Enter.
         assert!(matches!(
             assess("rm -rf /\n", false),
-            Risk::WouldExecute { .. }
+            Risk::MultiLine { .. }
         ));
+        assert!(matches!(assess("rm -rf /\n", true), Risk::MultiLine { .. }));
     }
 
     #[test]

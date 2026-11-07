@@ -122,11 +122,16 @@ fn ctrl_c_action(shift: bool, has_selection: bool) -> CtrlC {
 fn warning_for(risk: Risk, text: &str) -> Option<String> {
     match risk {
         Risk::Safe => None,
-        Risk::WouldExecute { lines } => Some(format!(
-            "You are about to paste {lines} lines.\n\n\
-             The running program did not ask for bracketed paste, so every line break \
-             runs just as if you had pressed Enter.\n\n\
+        Risk::MultiLine { lines, bracketed } => Some(format!(
+            "You are about to paste {lines} lines.\n\n{}\n\n\
              It starts with:\n    {}\n\nPaste anyway?",
+            if bracketed {
+                "The running program asked for bracketed paste, so it should receive the \
+                 line breaks as text rather than run them. It is free to run them anyway."
+            } else {
+                "The running program did not ask for bracketed paste, so every line break \
+                 runs just as if you had pressed Enter."
+            },
             preview(text)
         )),
         Risk::Large { bytes } => Some(format!(
@@ -1835,9 +1840,31 @@ mod tests {
     #[test]
     fn multiline_warning_names_the_line_count_and_shows_the_start() {
         let text = "rm -rf /tmp/rubbish\ncargo build\n";
-        let msg = warning_for(Risk::WouldExecute { lines: 3 }, text).unwrap();
+        let msg = warning_for(
+            Risk::MultiLine {
+                lines: 3,
+                bracketed: false,
+            },
+            text,
+        )
+        .unwrap();
         assert!(msg.contains("3 lines"), "{msg}");
         assert!(msg.contains("rm -rf /tmp/rubbish"), "{msg}");
+        assert!(msg.contains("did not ask for bracketed paste"), "{msg}");
+    }
+
+    #[test]
+    fn a_bracketed_multiline_paste_is_not_told_the_program_refused_brackets() {
+        let msg = warning_for(
+            Risk::MultiLine {
+                lines: 50,
+                bracketed: true,
+            },
+            "one\ntwo",
+        )
+        .unwrap();
+        assert!(msg.contains("50 lines"), "{msg}");
+        assert!(!msg.contains("did not ask"), "{msg}");
     }
 
     #[test]
