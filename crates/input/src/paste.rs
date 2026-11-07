@@ -45,11 +45,29 @@ pub fn normalize(text: &str) -> String {
     text.replace("\r\n", "\r").replace('\n', "\r")
 }
 
+/// Controls removed from pasted text, as foot does in `selection.c:2203-2283`.
+/// ESC has to go: clipboard text carrying `ESC[201~` would otherwise close the
+/// bracket early and the rest would arrive as typed commands. C1 is stripped on
+/// top of foot's list because U+009B is an eight-bit CSI and would reopen that
+/// hole. `bracketed` keeps NUL, BS and DEL, which a program that asked for
+/// bracketed paste can be trusted to treat as data.
+pub fn sanitize(text: &str, bracketed: bool) -> String {
+    text.chars()
+        .filter(|&c| match c {
+            '\t' | '\n' | '\r' | '\x0b' | '\x0c' => true,
+            '\0' | '\x08' | '\x7f' => bracketed,
+            '\x01'..='\x1f' | '\u{80}'..='\u{9f}' => false,
+            _ => true,
+        })
+        .collect()
+}
+
 /// Wraps the text so a program that asked for bracketed paste can tell it apart.
 pub fn bracket(text: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(text.len() + 12);
+    let body = sanitize(text, true);
+    let mut out = Vec::with_capacity(body.len() + 12);
     out.extend_from_slice(b"\x1b[200~");
-    out.extend_from_slice(text.as_bytes());
+    out.extend_from_slice(body.as_bytes());
     out.extend_from_slice(b"\x1b[201~");
     out
 }
@@ -121,5 +139,64 @@ mod tests {
     #[test]
     fn bracket_wraps_the_payload() {
         assert_eq!(bracket("hi"), b"\x1b[200~hi\x1b[201~");
+    }
+
+    fn body(out: &[u8]) -> Vec<u8> {
+        assert!(out.starts_with(b"\x1b[200~"));
+        assert!(out.ends_with(b"\x1b[201~"));
+        out[6..out.len() - 6].to_vec()
+    }
+
+    #[test]
+    fn the_end_sequence_cannot_survive_the_payload() {
+        let payloads = [
+            "\x1b[201~rm -rf /",
+            "ls\x1b[201~rm -rf /",
+            "ls\x1b[201~",
+            "\x1b[201~a\x1b[201~b",
+            "\x1b[2",
+            "01~rm -rf /",
+            "\x1b[201\x1b[201~~",
+            "\u{9b}201~rm -rf /",
+        ];
+        for payload in payloads {
+            let out = bracket(payload);
+            let inner = body(&out);
+            assert!(
+                !inner.contains(&0x1b),
+                "ESC reached the payload for {payload:?}"
+            );
+            assert!(
+                !inner.windows(6).any(|w| w == b"\x1b[201~"),
+                "the bracket closes early for {payload:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn concatenating_two_sanitized_halves_cannot_reform_the_sequence() {
+        let first = sanitize("echo \x1b[20", true);
+        let second = sanitize("1~rm -rf /", true);
+        let joined = format!("{first}{second}");
+        assert!(!joined.contains('\x1b'));
+    }
+
+    #[test]
+    fn formatting_controls_and_text_survive() {
+        assert_eq!(sanitize("a\tb\nc\rd", true), "a\tb\nc\rd");
+        assert_eq!(sanitize("áéñ 中文 😀", true), "áéñ 中文 😀");
+    }
+
+    #[test]
+    fn bracketed_paste_keeps_what_only_the_shell_would_act_on() {
+        assert_eq!(sanitize("a\x08b\x7fc\0d", true), "a\x08b\x7fc\0d");
+        assert_eq!(sanitize("a\x08b\x7fc\0d", false), "abcd");
+    }
+
+    #[test]
+    fn other_c0_and_c1_controls_go_either_way() {
+        assert_eq!(sanitize("a\x03b\x07c\x18d", true), "abcd");
+        assert_eq!(sanitize("a\x03b\x07c\x18d", false), "abcd");
+        assert_eq!(sanitize("a\u{9b}b\u{80}c", true), "abc");
     }
 }
