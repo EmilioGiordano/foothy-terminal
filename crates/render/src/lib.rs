@@ -43,6 +43,12 @@ mod builtin;
 /// choosing glyphs can rely on these being drawable whatever font is loaded.
 pub use builtin::BUILTIN as SYNTHESISED_GLYPHS;
 
+/// A styled glyph rasterises differently, so the style has to be part of the
+/// cache key or a bold cell is served the regular bitmap.
+fn glyph_key(c: char, style: u8) -> u32 {
+    c as u32 | (style as u32) << 24
+}
+
 struct Glyph {
     width: usize,
     height: usize,
@@ -58,7 +64,7 @@ pub struct Renderer {
     cell_h: usize,
     baseline: i32,
     palette: [u32; 256],
-    glyphs: HashMap<char, Glyph>,
+    glyphs: HashMap<u32, Glyph>,
     pad: usize,
     fg: u32,
     bg: u32,
@@ -156,7 +162,7 @@ impl Renderer {
                 break;
             }
             if ch != ' ' {
-                self.blit(buf, width, height, pen, y, ch, fg, bg);
+                self.blit(buf, width, height, pen, y, ch, 0, fg, bg);
             }
             pen += self.cell_w;
         }
@@ -262,12 +268,12 @@ impl Renderer {
         )
     }
 
-    fn glyph(&mut self, c: char) -> &Glyph {
+    fn glyph(&mut self, c: char, style: u8) -> &Glyph {
         let (cell_w, cell_h, baseline) = (self.cell_w, self.cell_h, self.baseline);
         let (font, px) = (&self.font, self.px);
         // Everything costly stays in the vacant arm: this runs once per cell per
         // frame, and a cache hit must not pay for a font lookup.
-        match self.glyphs.entry(c) {
+        match self.glyphs.entry(glyph_key(c, style)) {
             Entry::Occupied(hit) => hit.into_mut(),
             Entry::Vacant(slot) => {
                 let glyph = if font.lookup_glyph_index(c) == 0
@@ -423,7 +429,7 @@ impl Renderer {
                 );
 
                 if ch != ' ' && ch != '\0' {
-                    self.blit(buf, width, height, x0, y0, ch, fg, bg);
+                    self.blit(buf, width, height, x0, y0, ch, 0, fg, bg);
                 }
 
                 if on_cursor {
@@ -491,11 +497,12 @@ impl Renderer {
         x0: usize,
         y0: usize,
         ch: char,
+        style: u8,
         fg: u32,
         bg: u32,
     ) {
         let baseline = self.baseline;
-        let g = self.glyph(ch);
+        let g = self.glyph(ch, style);
         for gy in 0..g.height {
             let y = y0 as i32 + baseline - g.top + gy as i32;
             if y < 0 || y as usize >= height {
@@ -784,9 +791,9 @@ mod tests {
     #[test]
     fn glyphs_are_rerasterised_not_scaled() {
         let mut r = renderer();
-        let small = r.glyph('M').coverage.len();
+        let small = r.glyph('M', 0).coverage.len();
         r.set_font_size(32.0);
-        let big = r.glyph('M').coverage.len();
+        let big = r.glyph('M', 0).coverage.len();
         assert!(
             big > small,
             "the glyph should rasterise larger: {small} -> {big}"
