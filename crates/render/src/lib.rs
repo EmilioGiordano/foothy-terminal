@@ -56,11 +56,18 @@ const STYLED: Flags = Flags::BOLD
     .union(Flags::ALL_UNDERLINES);
 
 const STYLE_BOLD: u8 = 1;
+const STYLE_ITALIC: u8 = 2;
+
+/// About 11 degrees, the slant a real oblique face carries.
+const ITALIC_SHEAR: f32 = 0.2;
 
 fn style_bits(flags: Flags) -> u8 {
     let mut style = 0;
     if flags.contains(Flags::BOLD) {
         style |= STYLE_BOLD;
+    }
+    if flags.contains(Flags::ITALIC) {
+        style |= STYLE_ITALIC;
     }
     style
 }
@@ -77,32 +84,46 @@ fn is_line_art(c: char) -> bool {
     matches!(c, '\u{2500}'..='\u{259f}' | '\u{e0b0}'..='\u{e0d4}')
 }
 
-/// The single face is emboldened by smearing the coverage to the right. The
-/// result is clipped to the cell the glyph already occupied: `blit` overwrites
-/// instead of blending, so ink reaching left would punch a hole in the
-/// neighbour that is already drawn.
+/// The single face is emboldened by smearing the coverage to the right and
+/// slanted by shearing it about the baseline. The result is clipped to the cell
+/// the glyph already occupied: `blit` overwrites instead of blending, so ink
+/// reaching left would punch a hole in the neighbour that is already drawn.
 fn restyle(g: &Glyph, style: u8, px: f32, cell_w: usize) -> Glyph {
     let dilate = if style & STYLE_BOLD != 0 {
         (px / 16.0).round().max(1.0) as i32
     } else {
         0
     };
+    let shear = if style & STYLE_ITALIC != 0 {
+        ITALIC_SHEAR
+    } else {
+        0.0
+    };
+    let slant = |gy: usize| (shear * (g.top - gy as i32) as f32).round() as i32;
+
+    let mut back = 0;
+    let mut ahead = 0;
+    for gy in 0..g.height {
+        back = back.min(slant(gy));
+        ahead = ahead.max(slant(gy));
+    }
 
     let lo = g.left.min(0);
     let hi = (g.left + g.width as i32).max(cell_w as i32);
-    let left = g.left.max(lo);
-    let right = (g.left + g.width as i32 + dilate).min(hi);
+    let left = (g.left + back).max(lo);
+    let right = (g.left + ahead + g.width as i32 + dilate).min(hi);
     let width = (right - left).max(0) as usize;
 
     let mut coverage = vec![0u8; width * g.height];
     for gy in 0..g.height {
+        let d = slant(gy);
         for gx in 0..g.width {
             let a = g.coverage[gy * g.width + gx];
             if a == 0 {
                 continue;
             }
             for k in 0..=dilate {
-                let x = g.left + gx as i32 + k - left;
+                let x = g.left + d + gx as i32 + k - left;
                 if (0..width as i32).contains(&x) {
                     let slot = &mut coverage[gy * width + x as usize];
                     *slot = (*slot).max(a);
@@ -1286,6 +1307,73 @@ mod tests {
                 frame(&mut r, "\x1b[1m", &text),
                 frame(&mut r, "", &text),
                 "{c:?} was emboldened and will no longer meet its neighbour"
+            );
+        }
+    }
+
+    /// Mean x of the inked pixels in the top third of the first cell.
+    fn top_centre(r: &mut Renderer, sgr: &str) -> f32 {
+        let (cw, ch) = r.cell_size();
+        let w = cw * 4;
+        let buf = frame(r, sgr, "H");
+        let lit: Vec<usize> = (0..ch / 3)
+            .flat_map(|y| (0..cw).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[y * w + x] != DEFAULT_BG)
+            .map(|(x, _)| x)
+            .collect();
+        assert!(!lit.is_empty(), "{sgr:?} inked nothing to measure");
+        lit.iter().sum::<usize>() as f32 / lit.len() as f32
+    }
+
+    #[test]
+    fn italic_leans_the_top_of_the_glyph_to_the_right() {
+        let mut r = renderer();
+        let plain = top_centre(&mut r, "");
+        let italic = top_centre(&mut r, "\x1b[3m");
+        assert!(italic > plain, "italic {italic} vs regular {plain}");
+    }
+
+    #[test]
+    fn bold_italic_is_neither_bold_nor_italic() {
+        let mut r = renderer();
+        let plain = frame(&mut r, "", "X");
+        let bold = frame(&mut r, "\x1b[1m", "X");
+        let italic = frame(&mut r, "\x1b[3m", "X");
+        let both = frame(&mut r, "\x1b[1;3m", "X");
+        for (name, other) in [("regular", &plain), ("bold", &bold), ("italic", &italic)] {
+            assert_ne!(&both, other, "bold italic came out as {name}");
+        }
+    }
+
+    #[test]
+    fn a_slanted_glyph_stays_inside_the_cell_the_glyph_already_used() {
+        let mut r = renderer();
+        let (cw, _) = r.cell_size();
+        for c in "Xgjf|".chars() {
+            let (left, width) = {
+                let g = r.glyph(c, 0);
+                (g.left, g.width as i32)
+            };
+            for style in [STYLE_ITALIC, STYLE_BOLD | STYLE_ITALIC] {
+                let g = r.glyph(c, style);
+                assert!(g.left >= left.min(0), "{c:?} style {style} grew leftwards");
+                assert!(
+                    g.left + g.width as i32 <= (left + width).max(cw as i32),
+                    "{c:?} style {style} grew past the cell"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn italic_leaves_line_art_alone() {
+        let mut r = renderer();
+        for c in "┌─┐│█".chars() {
+            let text = c.to_string();
+            assert_eq!(
+                frame(&mut r, "\x1b[3m", &text),
+                frame(&mut r, "", &text),
+                "{c:?} was slanted and will no longer meet its neighbour"
             );
         }
     }
