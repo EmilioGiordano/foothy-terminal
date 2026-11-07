@@ -107,10 +107,8 @@ enum CtrlC {
     Interrupt,
 }
 
-/// Ctrl+Shift+C must never reach `input::encode`, which turns 'C' into 0x03 and
-/// kills the foreground process. Ctrl+C with nothing to copy must still be
-/// SIGINT, and a click leaves a selection range that holds no text, so there
-/// the copy decides.
+/// Ctrl+Shift+C must never reach `input::encode`, which sends 0x03. A
+/// click-only selection holds no text, so plain Ctrl+C lets the copy decide.
 fn ctrl_c_action(shift: bool, has_selection: bool) -> CtrlC {
     match (shift, has_selection) {
         (true, _) => CtrlC::Copy,

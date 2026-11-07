@@ -8,8 +8,7 @@ pub const LARGE_PASTE: usize = 4096;
 pub enum Risk {
     /// Nothing to ask about.
     Safe,
-    /// Carries line breaks. `bracketed` is whether the running program asked
-    /// for bracketed paste, which only changes how the confirmation reads.
+    /// Carries line breaks.
     MultiLine { lines: usize, bracketed: bool },
     /// Big enough that the user cannot have read all of it.
     Large { bytes: usize },
@@ -43,12 +42,8 @@ pub fn normalize(text: &str) -> String {
     text.replace("\r\n", "\r").replace('\n', "\r")
 }
 
-/// Controls removed from pasted text, as foot does in `selection.c:2203-2283`.
-/// ESC has to go: clipboard text carrying `ESC[201~` would otherwise close the
-/// bracket early and the rest would arrive as typed commands. C1 is stripped on
-/// top of foot's list because U+009B is an eight-bit CSI and would reopen that
-/// hole. `bracketed` keeps NUL, BS and DEL, which a program that asked for
-/// bracketed paste can be trusted to treat as data.
+/// ESC and C1 must go: pasted text carrying `ESC[201~` or an eight-bit CSI
+/// would close the bracket early and the rest would arrive as typed commands.
 pub fn sanitize(text: &str, bracketed: bool) -> String {
     text.chars()
         .filter(|&c| match c {
