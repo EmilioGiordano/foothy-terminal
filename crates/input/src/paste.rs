@@ -8,10 +8,14 @@ pub const LARGE_PASTE: usize = 4096;
 pub enum Risk {
     /// Nothing to ask about.
     Safe,
-    /// Carries line breaks.
-    MultiLine { lines: usize, bracketed: bool },
+    MultiLine {
+        lines: usize,
+        bracketed: bool,
+    },
     /// Big enough that the user cannot have read all of it.
-    Large { bytes: usize },
+    Large {
+        bytes: usize,
+    },
 }
 
 pub fn assess(text: &str, bracketed: bool) -> Risk {
@@ -151,26 +155,27 @@ mod tests {
 
     #[test]
     fn the_end_sequence_cannot_survive_the_payload() {
-        let payloads = [
-            "\x1b[201~rm -rf /",
-            "ls\x1b[201~rm -rf /",
-            "ls\x1b[201~",
-            "\x1b[201~a\x1b[201~b",
-            "\x1b[2",
-            "01~rm -rf /",
-            "\x1b[201\x1b[201~~",
-            "\u{9b}201~rm -rf /",
+        let cases = [
+            ("\x1b[201~rm -rf /", "[201~rm -rf /"),
+            ("ls\x1b[201~rm -rf /", "ls[201~rm -rf /"),
+            ("ls\x1b[201~", "ls[201~"),
+            ("\x1b[201~a\x1b[201~b", "[201~a[201~b"),
+            ("\x1b[2", "[2"),
+            ("01~rm -rf /", "01~rm -rf /"),
+            ("\x1b[201\x1b[201~~", "[201[201~~"),
+            ("\u{9b}201~rm -rf /", "201~rm -rf /"),
         ];
-        for payload in payloads {
+        for (payload, expected) in cases {
             let out = bracket(payload);
             let inner = body(&out);
+            assert_eq!(
+                inner,
+                expected.as_bytes(),
+                "unexpected payload for {payload:?}"
+            );
             assert!(
                 !inner.contains(&0x1b),
                 "ESC reached the payload for {payload:?}"
-            );
-            assert!(
-                !inner.windows(6).any(|w| w == b"\x1b[201~"),
-                "the bracket closes early for {payload:?}"
             );
         }
     }
