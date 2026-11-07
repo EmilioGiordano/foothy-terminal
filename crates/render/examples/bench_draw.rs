@@ -86,5 +86,24 @@ fn main() -> anyhow::Result<()> {
     term.update_selection(size.screen_lines - 1, size.columns - 1, Side::Right);
     time("Lines selection (line)", &mut r, &term, &mut buf, w, h);
 
+    let mut styled = Terminal::new(size);
+    for i in 0..size.screen_lines {
+        let sgr = ["0", "1", "2", "3", "4", "9", "1;4", "2;3"][i % 8];
+        styled.feed(
+            format!(
+                "\x1b[{sgr}mline {i} with padding chars used to fill the complete row\x1b[0m\r\n"
+            )
+            .as_bytes(),
+        );
+    }
+    time(
+        "every attribute, one per line",
+        &mut r,
+        &styled,
+        &mut buf,
+        w,
+        h,
+    );
+
     Ok(())
 }
