@@ -55,10 +55,69 @@ const STYLED: Flags = Flags::BOLD
     .union(Flags::STRIKEOUT)
     .union(Flags::ALL_UNDERLINES);
 
+const STYLE_BOLD: u8 = 1;
+
+fn style_bits(flags: Flags) -> u8 {
+    let mut style = 0;
+    if flags.contains(Flags::BOLD) {
+        style |= STYLE_BOLD;
+    }
+    style
+}
+
 /// A styled glyph rasterises differently, so the style has to be part of the
 /// cache key or a bold cell is served the regular bitmap.
 fn glyph_key(c: char, style: u8) -> u32 {
     c as u32 | (style as u32) << 24
+}
+
+/// Box drawing, blocks and the Powerline arrows: thickening or slanting these
+/// breaks lines that have to meet across the cell edge.
+fn is_line_art(c: char) -> bool {
+    matches!(c, '\u{2500}'..='\u{259f}' | '\u{e0b0}'..='\u{e0d4}')
+}
+
+/// The single face is emboldened by smearing the coverage to the right. The
+/// result is clipped to the cell the glyph already occupied: `blit` overwrites
+/// instead of blending, so ink reaching left would punch a hole in the
+/// neighbour that is already drawn.
+fn restyle(g: &Glyph, style: u8, px: f32, cell_w: usize) -> Glyph {
+    let dilate = if style & STYLE_BOLD != 0 {
+        (px / 16.0).round().max(1.0) as i32
+    } else {
+        0
+    };
+
+    let lo = g.left.min(0);
+    let hi = (g.left + g.width as i32).max(cell_w as i32);
+    let left = g.left.max(lo);
+    let right = (g.left + g.width as i32 + dilate).min(hi);
+    let width = (right - left).max(0) as usize;
+
+    let mut coverage = vec![0u8; width * g.height];
+    for gy in 0..g.height {
+        for gx in 0..g.width {
+            let a = g.coverage[gy * g.width + gx];
+            if a == 0 {
+                continue;
+            }
+            for k in 0..=dilate {
+                let x = g.left + gx as i32 + k - left;
+                if (0..width as i32).contains(&x) {
+                    let slot = &mut coverage[gy * width + x as usize];
+                    *slot = (*slot).max(a);
+                }
+            }
+        }
+    }
+
+    Glyph {
+        width,
+        height: g.height,
+        left,
+        top: g.top,
+        coverage,
+    }
 }
 
 struct Glyph {
@@ -313,12 +372,17 @@ impl Renderer {
                     }
                 } else {
                     let (m, coverage) = font.rasterize(c, px);
-                    Glyph {
+                    let plain = Glyph {
                         width: m.width,
                         height: m.height,
                         left: m.xmin,
                         top: m.height as i32 + m.ymin,
                         coverage,
+                    };
+                    if style != 0 && !is_line_art(c) {
+                        restyle(&plain, style, px, cell_w)
+                    } else {
+                        plain
                     }
                 };
                 slot.insert(glyph)
@@ -455,12 +519,16 @@ impl Renderer {
                 // Chrome, not text: the cursor never dims.
                 let cursor_fg = fg;
                 let styled = flags.intersects(STYLED);
-                if styled && flags.contains(Flags::DIM) {
-                    fg = blend(bg, fg, DIM_ALPHA);
+                let mut style = 0;
+                if styled {
+                    if flags.contains(Flags::DIM) {
+                        fg = blend(bg, fg, DIM_ALPHA);
+                    }
+                    style = style_bits(flags);
                 }
 
                 if ch != ' ' && ch != '\0' {
-                    self.blit(buf, width, height, x0, y0, ch, 0, fg, bg);
+                    self.blit(buf, width, height, x0, y0, ch, style, fg, bg);
                 }
 
                 // Spaces carry them too, so this cannot live under the blit.
@@ -1140,6 +1208,85 @@ mod tests {
                 r.line_thickness
             );
             assert!(r.strikeout_y < r.underline_y, "{px}px: the lines crossed");
+        }
+    }
+
+    fn frame(r: &mut Renderer, sgr: &str, text: &str) -> Vec<u32> {
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        let mut term = Terminal::new(TermSize::new(4, 2));
+        term.feed(format!("{sgr}{text}").as_bytes());
+        let mut buf = vec![0u32; w * h];
+        r.clear(&mut buf);
+        r.draw(&term, &mut buf, w, h, CursorLook::Hidden);
+        buf
+    }
+
+    /// Pixels of the first cell that are not the background.
+    fn inked(r: &mut Renderer, sgr: &str, text: &str) -> usize {
+        let (cw, ch) = r.cell_size();
+        let w = cw * 4;
+        let buf = frame(r, sgr, text);
+        (0..ch)
+            .flat_map(|y| (0..cw).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[y * w + x] != DEFAULT_BG)
+            .count()
+    }
+
+    #[test]
+    fn bold_puts_more_ink_in_the_cell() {
+        let mut r = renderer();
+        let plain = inked(&mut r, "", "X");
+        let bold = inked(&mut r, "\x1b[1m", "X");
+        assert!(bold > plain, "bold {bold} vs regular {plain} pixels");
+    }
+
+    #[test]
+    fn the_cache_serves_each_style_its_own_glyph() {
+        let mut first_plain = renderer();
+        let plain = frame(&mut first_plain, "", "X");
+        let bold_second = frame(&mut first_plain, "\x1b[1m", "X");
+
+        let mut first_bold = renderer();
+        let bold = frame(&mut first_bold, "\x1b[1m", "X");
+        let plain_second = frame(&mut first_bold, "", "X");
+
+        assert_ne!(plain, bold, "bold drew the regular glyph");
+        assert_eq!(
+            plain, plain_second,
+            "a cached bold glyph leaked into regular"
+        );
+        assert_eq!(bold, bold_second, "a cached regular glyph leaked into bold");
+    }
+
+    #[test]
+    fn bold_stays_inside_the_cell_the_glyph_already_used() {
+        let mut r = renderer();
+        let (cw, _) = r.cell_size();
+        for c in "XMi#(".chars() {
+            let (left, width) = {
+                let g = r.glyph(c, 0);
+                (g.left, g.width as i32)
+            };
+            let g = r.glyph(c, STYLE_BOLD);
+            assert!(g.left >= left.min(0), "{c:?} grew leftwards");
+            assert!(
+                g.left + g.width as i32 <= (left + width).max(cw as i32),
+                "{c:?} grew past the cell"
+            );
+        }
+    }
+
+    #[test]
+    fn bold_leaves_line_art_alone() {
+        let mut r = renderer();
+        for c in "┌─┐│█".chars() {
+            let text = c.to_string();
+            assert_eq!(
+                frame(&mut r, "\x1b[1m", &text),
+                frame(&mut r, "", &text),
+                "{c:?} was emboldened and will no longer meet its neighbour"
+            );
         }
     }
 
