@@ -1024,7 +1024,7 @@ impl App {
         if bracketed {
             self.send(&paste::bracket(&text));
         } else {
-            self.send(text.as_bytes());
+            self.send(paste::sanitize(&text, false).as_bytes());
         }
         if let Some(pane) = self.panes.focused_mut() {
             pane.term.scroll(Scroll::Bottom);
