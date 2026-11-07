@@ -97,14 +97,36 @@ fn preview(text: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CtrlC {
+    Copy,
+    CopyOrInterrupt,
+    Interrupt,
+}
+
+/// Ctrl+Shift+C must never reach `input::encode`, which sends 0x03. A
+/// click-only selection holds no text, so plain Ctrl+C lets the copy decide.
+fn ctrl_c_action(shift: bool, has_selection: bool) -> CtrlC {
+    match (shift, has_selection) {
+        (true, _) => CtrlC::Copy,
+        (false, true) => CtrlC::CopyOrInterrupt,
+        (false, false) => CtrlC::Interrupt,
+    }
+}
+
 fn warning_for(risk: Risk, text: &str) -> Option<String> {
     match risk {
         Risk::Safe => None,
-        Risk::WouldExecute { lines } => Some(format!(
-            "You are about to paste {lines} lines.\n\n\
-             The running program did not ask for bracketed paste, so every line break \
-             runs just as if you had pressed Enter.\n\n\
+        Risk::MultiLine { lines, bracketed } => Some(format!(
+            "You are about to paste {lines} lines.\n\n{}\n\n\
              It starts with:\n    {}\n\nPaste anyway?",
+            if bracketed {
+                "The running program asked for bracketed paste, so it should receive the \
+                 line breaks as text rather than run them. It is free to run them anyway."
+            } else {
+                "The running program did not ask for bracketed paste, so every line break \
+                 runs just as if you had pressed Enter."
+            },
             preview(text)
         )),
         Risk::Large { bytes } => Some(format!(
@@ -1003,7 +1025,7 @@ impl App {
         if bracketed {
             self.send(&paste::bracket(&text));
         } else {
-            self.send(text.as_bytes());
+            self.send(paste::sanitize(&text, false).as_bytes());
         }
         if let Some(pane) = self.panes.focused_mut() {
             pane.term.scroll(Scroll::Bottom);
@@ -1397,10 +1419,17 @@ impl ApplicationHandler for App {
                         self.panes.focused().is_some_and(|p| p.term.has_selection());
                     match &event.logical_key {
                         WKey::Character(c) if c.eq_ignore_ascii_case("c") => {
-                            // Ctrl+C only copies when there is a selection;
-                            // otherwise it must stay SIGINT.
-                            if (self.mods.shift || has_selection) && self.copy() {
-                                return;
+                            match ctrl_c_action(self.mods.shift, has_selection) {
+                                CtrlC::Copy => {
+                                    self.copy();
+                                    return;
+                                }
+                                CtrlC::CopyOrInterrupt => {
+                                    if self.copy() {
+                                        return;
+                                    }
+                                }
+                                CtrlC::Interrupt => {}
                             }
                         }
                         WKey::Character(c) if c.eq_ignore_ascii_case("v") => {
@@ -1777,6 +1806,29 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_shift_c_never_interrupts() {
+        assert_eq!(ctrl_c_action(true, true), CtrlC::Copy);
+        assert_eq!(ctrl_c_action(true, false), CtrlC::Copy);
+    }
+
+    #[test]
+    fn ctrl_c_copies_a_selection_and_otherwise_interrupts() {
+        assert_eq!(ctrl_c_action(false, true), CtrlC::CopyOrInterrupt);
+        assert_eq!(ctrl_c_action(false, false), CtrlC::Interrupt);
+    }
+
+    #[test]
+    fn ctrl_shift_c_never_yields_interrupt() {
+        for has_selection in [true, false] {
+            assert_ne!(
+                ctrl_c_action(true, has_selection),
+                CtrlC::Interrupt,
+                "has_selection={has_selection} would send 0x03"
+            );
+        }
+    }
+
+    #[test]
     fn safe_paste_asks_nothing() {
         assert_eq!(warning_for(Risk::Safe, "cargo build"), None);
     }
@@ -1784,9 +1836,31 @@ mod tests {
     #[test]
     fn multiline_warning_names_the_line_count_and_shows_the_start() {
         let text = "rm -rf /tmp/rubbish\ncargo build\n";
-        let msg = warning_for(Risk::WouldExecute { lines: 3 }, text).unwrap();
+        let msg = warning_for(
+            Risk::MultiLine {
+                lines: 3,
+                bracketed: false,
+            },
+            text,
+        )
+        .unwrap();
         assert!(msg.contains("3 lines"), "{msg}");
         assert!(msg.contains("rm -rf /tmp/rubbish"), "{msg}");
+        assert!(msg.contains("did not ask for bracketed paste"), "{msg}");
+    }
+
+    #[test]
+    fn a_bracketed_multiline_paste_is_not_told_the_program_refused_brackets() {
+        let msg = warning_for(
+            Risk::MultiLine {
+                lines: 50,
+                bracketed: true,
+            },
+            "one\ntwo",
+        )
+        .unwrap();
+        assert!(msg.contains("50 lines"), "{msg}");
+        assert!(!msg.contains("did not ask"), "{msg}");
     }
 
     #[test]
