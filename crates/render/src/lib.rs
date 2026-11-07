@@ -43,6 +43,14 @@ mod builtin;
 /// choosing glyphs can rely on these being drawable whatever font is loaded.
 pub use builtin::BUILTIN as SYNTHESISED_GLYPHS;
 
+/// The gate for every attribute below: a cell carrying none of them must not
+/// pay for the styled path.
+const STYLED: Flags = Flags::BOLD
+    .union(Flags::ITALIC)
+    .union(Flags::DIM)
+    .union(Flags::STRIKEOUT)
+    .union(Flags::ALL_UNDERLINES);
+
 /// A styled glyph rasterises differently, so the style has to be part of the
 /// cache key or a bold cell is served the regular bitmap.
 fn glyph_key(c: char, style: u8) -> u32 {
@@ -63,6 +71,9 @@ pub struct Renderer {
     cell_w: usize,
     cell_h: usize,
     baseline: i32,
+    underline_y: usize,
+    strikeout_y: usize,
+    line_thickness: usize,
     palette: [u32; 256],
     glyphs: HashMap<u32, Glyph>,
     pad: usize,
@@ -84,6 +95,7 @@ impl Renderer {
 
         let (cell_w, cell_h, baseline) = metrics(&font, px)
             .ok_or_else(|| anyhow::anyhow!("font has no horizontal line metrics"))?;
+        let (underline_y, strikeout_y, line_thickness) = line_metrics(px, baseline, cell_h);
 
         Ok(Self {
             font,
@@ -91,6 +103,9 @@ impl Renderer {
             cell_w,
             cell_h,
             baseline,
+            underline_y,
+            strikeout_y,
+            line_thickness,
             palette: *palette,
             glyphs: HashMap::new(),
             pad: 0,
@@ -117,10 +132,14 @@ impl Renderer {
         let Some((cell_w, cell_h, baseline)) = metrics(&self.font, px) else {
             return false;
         };
+        let (underline_y, strikeout_y, line_thickness) = line_metrics(px, baseline, cell_h);
         self.px = px;
         self.cell_w = cell_w;
         self.cell_h = cell_h;
         self.baseline = baseline;
+        self.underline_y = underline_y;
+        self.strikeout_y = strikeout_y;
+        self.line_thickness = line_thickness;
         self.glyphs.clear();
         true
     }
@@ -377,10 +396,11 @@ impl Renderer {
                     break;
                 }
 
-                let (ch, mut fg, mut bg, wide, skip) = {
+                let (ch, mut fg, mut bg, wide, skip, flags) = {
                     let cell =
                         &term.term().grid()[Point::new(Line(row as i32 - offset), Column(col))];
-                    let inverse = cell.flags.contains(Flags::INVERSE);
+                    let flags = cell.flags;
+                    let inverse = flags.contains(Flags::INVERSE);
                     let (f, b) = if inverse {
                         (
                             self.resolve(cell.bg, self.bg),
@@ -396,9 +416,9 @@ impl Renderer {
                         cell.c,
                         f,
                         b,
-                        cell.flags.contains(Flags::WIDE_CHAR),
-                        cell.flags
-                            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
+                        flags.contains(Flags::WIDE_CHAR),
+                        flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
+                        flags,
                     )
                 };
 
@@ -432,10 +452,38 @@ impl Renderer {
                     self.blit(buf, width, height, x0, y0, ch, 0, fg, bg);
                 }
 
+                // Spaces carry them too, so this cannot live under the blit.
+                if flags.intersects(STYLED) {
+                    self.draw_lines(buf, width, height, x0, y0, span, flags, fg);
+                }
+
                 if on_cursor {
                     self.draw_cursor(buf, width, height, x0, y0, cursor_look, fg);
                 }
             }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_lines(
+        &self,
+        buf: &mut [u32],
+        width: usize,
+        height: usize,
+        x0: usize,
+        y0: usize,
+        span: usize,
+        flags: Flags,
+        fg: u32,
+    ) {
+        let w = self.cell_w * span;
+        if flags.intersects(Flags::ALL_UNDERLINES) {
+            let y = y0 + self.underline_y;
+            fill_rect(buf, width, height, x0, y, w, self.line_thickness, fg);
+        }
+        if flags.contains(Flags::STRIKEOUT) {
+            let y = y0 + self.strikeout_y;
+            fill_rect(buf, width, height, x0, y, w, self.line_thickness, fg);
         }
     }
 
@@ -542,6 +590,18 @@ fn metrics(font: &Font, px: f32) -> Option<(usize, usize, i32)> {
     let cell_h = (lm.ascent - lm.descent + lm.line_gap).ceil().max(1.0) as usize;
     let cell_w = font.metrics('M', px).advance_width.ceil().max(1.0) as usize;
     Some((cell_w, cell_h, lm.ascent.ceil() as i32))
+}
+
+/// fontdue exposes no underline or strikeout metrics, so these are fractions of
+/// the em, which is what `px` measures: CascadiaMono's own `post` and `OS/2`
+/// give 100/2048 for the underline and its thickness and 636/2048 for the
+/// strikeout. Both are clamped so a line never lands outside the cell.
+fn line_metrics(px: f32, baseline: i32, cell_h: usize) -> (usize, usize, usize) {
+    let thickness = (px * 0.049).round().max(1.0) as usize;
+    let last = cell_h.saturating_sub(thickness) as i32;
+    let under = (baseline + (px * 0.049).round().max(1.0) as i32).clamp(0, last);
+    let strike = (baseline - (px * 0.31).round() as i32).clamp(0, last);
+    (under as usize, strike as usize, thickness)
 }
 
 fn blend(bg: u32, fg: u32, a: u8) -> u32 {
@@ -970,6 +1030,106 @@ mod tests {
         assert_eq!(slab(&mut r), 0x00dc_ecf5);
         r.set_colors(0x0000_0000, 0x00ff_ffff);
         assert_eq!(slab(&mut r), 0x0000_0000);
+    }
+
+    /// Draws `sgr` into a one-row grid and returns the rows of the first cell
+    /// that hold a pixel the same cell drew without the attribute.
+    fn added_rows(sgr: &str, text: &str) -> Vec<usize> {
+        let mut r = renderer();
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        let frame = |r: &mut Renderer, prefix: &str| {
+            let mut term = Terminal::new(TermSize::new(4, 2));
+            term.feed(format!("{prefix}{text}").as_bytes());
+            let mut buf = vec![0u32; w * h];
+            r.clear(&mut buf);
+            r.draw(&term, &mut buf, w, h, CursorLook::Hidden);
+            buf
+        };
+        let plain = frame(&mut r, "");
+        let styled = frame(&mut r, sgr);
+        (0..ch)
+            .filter(|&y| (0..cw).any(|x| styled[y * w + x] != plain[y * w + x]))
+            .collect()
+    }
+
+    #[test]
+    fn an_underline_lands_below_the_glyph_and_inside_the_cell() {
+        let (_, ch) = renderer().cell_size();
+        let rows = added_rows("\x1b[4m", "X");
+        assert!(!rows.is_empty(), "the underline was not drawn");
+        assert!(rows.len() <= 2, "it covers {} rows", rows.len());
+        assert!(rows[0] > ch / 2, "it sits at row {} of {ch}", rows[0]);
+        assert!(*rows.last().unwrap() < ch, "it spills out of the cell");
+    }
+
+    #[test]
+    fn an_underlined_space_is_still_underlined() {
+        assert!(
+            !added_rows("\x1b[4m", " ").is_empty(),
+            "a space lost its underline"
+        );
+    }
+
+    #[test]
+    fn every_underline_style_draws_a_line() {
+        // Double, curly, dotted and dashed all come out single: better a line
+        // than nothing until they are drawn properly.
+        for sgr in [
+            "\x1b[4m",
+            "\x1b[4:2m",
+            "\x1b[4:3m",
+            "\x1b[4:4m",
+            "\x1b[4:5m",
+        ] {
+            assert!(!added_rows(sgr, "X").is_empty(), "{sgr:?} drew nothing");
+        }
+    }
+
+    #[test]
+    fn a_strikeout_crosses_the_middle_of_the_cell() {
+        let (_, ch) = renderer().cell_size();
+        let rows = added_rows("\x1b[9m", " ");
+        assert!(!rows.is_empty(), "the strikeout was not drawn");
+        assert!(rows.len() <= 2, "it covers {} rows", rows.len());
+        assert!(
+            rows[0] > 0 && *rows.last().unwrap() < ch,
+            "{rows:?} is not inside the cell"
+        );
+    }
+
+    #[test]
+    fn the_lines_follow_the_cell_into_a_second_column_when_the_char_is_wide() {
+        let mut r = renderer();
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 6, ch * 2);
+        let mut term = Terminal::new(TermSize::new(6, 2));
+        term.feed("\x1b[4;9m中".as_bytes());
+        let mut buf = vec![0u32; w * h];
+        r.clear(&mut buf);
+        r.draw(&term, &mut buf, w, h, CursorLook::Hidden);
+
+        let lit = |col: usize| (0..ch).any(|y| buf[y * w + col * cw + cw / 2] != DEFAULT_BG);
+        assert!(lit(0), "the leading half is unmarked");
+        assert!(lit(1), "the trailing half is unmarked");
+        assert!(!lit(2), "the lines ran past the wide cell");
+    }
+
+    #[test]
+    fn the_lines_stay_inside_the_cell_at_every_font_size() {
+        let mut r = renderer();
+        for px in [MIN_FONT_PX, 9.0, 16.0, 33.0, MAX_FONT_PX] {
+            r.set_font_size(px);
+            let (_, ch) = r.cell_size();
+            assert!(
+                r.underline_y + r.line_thickness <= ch && r.strikeout_y + r.line_thickness <= ch,
+                "{px}px: underline {} strikeout {} thickness {} in {ch}",
+                r.underline_y,
+                r.strikeout_y,
+                r.line_thickness
+            );
+            assert!(r.strikeout_y < r.underline_y, "{px}px: the lines crossed");
+        }
     }
 
     #[test]
