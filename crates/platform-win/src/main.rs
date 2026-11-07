@@ -100,6 +100,25 @@ fn preview(text: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CtrlC {
+    Copy,
+    CopyOrInterrupt,
+    Interrupt,
+}
+
+/// Ctrl+Shift+C must never reach `input::encode`, which turns 'C' into 0x03 and
+/// kills the foreground process. Ctrl+C with nothing to copy must still be
+/// SIGINT, and a click leaves a selection range that holds no text, so there
+/// the copy decides.
+fn ctrl_c_action(shift: bool, has_selection: bool) -> CtrlC {
+    match (shift, has_selection) {
+        (true, _) => CtrlC::Copy,
+        (false, true) => CtrlC::CopyOrInterrupt,
+        (false, false) => CtrlC::Interrupt,
+    }
+}
+
 fn warning_for(risk: Risk, text: &str) -> Option<String> {
     match risk {
         Risk::Safe => None,
@@ -1399,10 +1418,17 @@ impl ApplicationHandler for App {
                         self.panes.focused().is_some_and(|p| p.term.has_selection());
                     match &event.logical_key {
                         WKey::Character(c) if c.eq_ignore_ascii_case("c") => {
-                            // Ctrl+C only copies when there is a selection;
-                            // otherwise it must stay SIGINT.
-                            if (self.mods.shift || has_selection) && self.copy() {
-                                return;
+                            match ctrl_c_action(self.mods.shift, has_selection) {
+                                CtrlC::Copy => {
+                                    self.copy();
+                                    return;
+                                }
+                                CtrlC::CopyOrInterrupt => {
+                                    if self.copy() {
+                                        return;
+                                    }
+                                }
+                                CtrlC::Interrupt => {}
                             }
                         }
                         WKey::Character(c) if c.eq_ignore_ascii_case("v") => {
@@ -1776,6 +1802,29 @@ mod tests {
         assert_eq!(p.outline_alpha(), 255);
         let settled = p.rect();
         assert_eq!((settled.x, settled.w), (50.0, 50.0));
+    }
+
+    #[test]
+    fn ctrl_shift_c_never_interrupts() {
+        assert_eq!(ctrl_c_action(true, true), CtrlC::Copy);
+        assert_eq!(ctrl_c_action(true, false), CtrlC::Copy);
+    }
+
+    #[test]
+    fn ctrl_c_copies_a_selection_and_otherwise_interrupts() {
+        assert_eq!(ctrl_c_action(false, true), CtrlC::CopyOrInterrupt);
+        assert_eq!(ctrl_c_action(false, false), CtrlC::Interrupt);
+    }
+
+    #[test]
+    fn only_plain_ctrl_c_without_a_selection_reaches_the_encoder() {
+        for (shift, has_selection) in [(true, true), (true, false), (false, true)] {
+            assert_ne!(
+                ctrl_c_action(shift, has_selection),
+                CtrlC::Interrupt,
+                "shift={shift} has_selection={has_selection} would send 0x03"
+            );
+        }
     }
 
     #[test]
