@@ -97,14 +97,20 @@ fn restyle(g: &Glyph, style: u8, px: f32, cell_w: usize) -> Glyph {
     } else {
         0.0
     };
-    let slant = |gy: usize| (shear * (g.top - gy as i32) as f32).round() as i32;
-
+    let sheared = |gy: usize| (shear * (g.top - gy as i32) as f32).round() as i32;
     let mut back = 0;
     let mut ahead = 0;
     for gy in 0..g.height {
-        back = back.min(slant(gy));
-        ahead = ahead.max(slant(gy));
+        back = back.min(sheared(gy));
+        ahead = ahead.max(sheared(gy));
     }
+    // Centred on the glyph's own ink: shearing about the baseline alone pushes
+    // every row right, and the widest glyphs then lose their top stem to the
+    // clip below.
+    let bias = (ahead + back) / 2;
+    let slant = |gy: usize| sheared(gy) - bias;
+    back -= bias;
+    ahead -= bias;
 
     let lo = g.left.min(0);
     let hi = (g.left + g.width as i32).max(cell_w as i32);
