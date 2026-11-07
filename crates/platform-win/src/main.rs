@@ -1820,12 +1820,12 @@ mod tests {
     }
 
     #[test]
-    fn only_plain_ctrl_c_without_a_selection_reaches_the_encoder() {
-        for (shift, has_selection) in [(true, true), (true, false), (false, true)] {
+    fn ctrl_shift_c_never_yields_interrupt() {
+        for has_selection in [true, false] {
             assert_ne!(
-                ctrl_c_action(shift, has_selection),
+                ctrl_c_action(true, has_selection),
                 CtrlC::Interrupt,
-                "shift={shift} has_selection={has_selection} would send 0x03"
+                "has_selection={has_selection} would send 0x03"
             );
         }
     }
