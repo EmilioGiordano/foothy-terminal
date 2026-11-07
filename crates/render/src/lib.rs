@@ -43,6 +43,10 @@ mod builtin;
 /// choosing glyphs can rely on these being drawable whatever font is loaded.
 pub use builtin::BUILTIN as SYNTHESISED_GLYPHS;
 
+/// foot's default `dim-amount=1.5` as a blend weight: `render.c:283` computes
+/// `t = 1 - 1/amount`.
+const DIM_ALPHA: u8 = 170;
+
 /// The gate for every attribute below: a cell carrying none of them must not
 /// pay for the styled path.
 const STYLED: Flags = Flags::BOLD
@@ -448,17 +452,24 @@ impl Renderer {
                     bg,
                 );
 
+                // Chrome, not text: the cursor never dims.
+                let cursor_fg = fg;
+                let styled = flags.intersects(STYLED);
+                if styled && flags.contains(Flags::DIM) {
+                    fg = blend(bg, fg, DIM_ALPHA);
+                }
+
                 if ch != ' ' && ch != '\0' {
                     self.blit(buf, width, height, x0, y0, ch, 0, fg, bg);
                 }
 
                 // Spaces carry them too, so this cannot live under the blit.
-                if flags.intersects(STYLED) {
+                if styled {
                     self.draw_lines(buf, width, height, x0, y0, span, flags, fg);
                 }
 
                 if on_cursor {
-                    self.draw_cursor(buf, width, height, x0, y0, cursor_look, fg);
+                    self.draw_cursor(buf, width, height, x0, y0, cursor_look, cursor_fg);
                 }
             }
         }
@@ -592,10 +603,9 @@ fn metrics(font: &Font, px: f32) -> Option<(usize, usize, i32)> {
     Some((cell_w, cell_h, lm.ascent.ceil() as i32))
 }
 
-/// fontdue exposes no underline or strikeout metrics, so these are fractions of
-/// the em, which is what `px` measures: CascadiaMono's own `post` and `OS/2`
-/// give 100/2048 for the underline and its thickness and 636/2048 for the
-/// strikeout. Both are clamped so a line never lands outside the cell.
+/// Fractions of the em, which is what `px` measures: fontdue exposes no
+/// underline or strikeout metrics. Clamped so a line cannot land outside the
+/// cell.
 fn line_metrics(px: f32, baseline: i32, cell_h: usize) -> (usize, usize, usize) {
     let thickness = (px * 0.049).round().max(1.0) as usize;
     let last = cell_h.saturating_sub(thickness) as i32;
@@ -635,6 +645,7 @@ fn fill_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vt_core::{SelectionType, Side};
 
     const FONT_CANDIDATES: &[&str] = &[
         r"C:\Windows\Fonts\CascadiaMono.ttf",
@@ -1130,6 +1141,75 @@ mod tests {
             );
             assert!(r.strikeout_y < r.underline_y, "{px}px: the lines crossed");
         }
+    }
+
+    /// A pixel on the strikeout of the second cell: a solid run of foreground,
+    /// so the sample does not depend on where a glyph puts its ink.
+    fn struck_pixel(sgr: &str, fg: u32, bg: u32) -> u32 {
+        let mut r = renderer();
+        r.set_colors(fg, bg);
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        let mut term = Terminal::new(TermSize::new(4, 2));
+        term.feed(format!("{sgr}  ").as_bytes());
+        let mut buf = vec![0u32; w * h];
+        r.clear(&mut buf);
+        r.draw(&term, &mut buf, w, h, CursorLook::Hidden);
+        buf[r.strikeout_y * w + cw + cw / 2]
+    }
+
+    #[test]
+    fn dim_moves_the_foreground_towards_the_background() {
+        let (fg, bg) = (0x00ff_ffff, 0x0000_0000);
+        let plain = struck_pixel("\x1b[9m", fg, bg);
+        let dim = struck_pixel("\x1b[2;9m", fg, bg);
+        assert_eq!(plain, fg);
+        assert!(dim != plain && dim != bg, "dim gave {dim:06x}");
+        assert_eq!(dim, blend(bg, fg, DIM_ALPHA));
+    }
+
+    #[test]
+    fn dim_under_inverse_fades_towards_the_cell_it_is_drawn_on() {
+        // Inverse swaps the pair first, so dim always walks towards whatever
+        // this cell actually paints behind the text.
+        let (fg, bg) = (0x00ff_ffff, 0x0000_0000);
+        let dim = struck_pixel("\x1b[7;2;9m", fg, bg);
+        assert_eq!(dim, blend(fg, bg, DIM_ALPHA));
+    }
+
+    #[test]
+    fn dim_keeps_selected_text_legible() {
+        let (fg, bg) = (0x00ff_ffff, 0x0000_0000);
+        let mut r = renderer();
+        r.set_colors(fg, bg);
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        let mut term = Terminal::new(TermSize::new(4, 2));
+        term.feed(b"\x1b[2;9m  ");
+        term.start_selection(0, 0, Side::Left, SelectionType::Simple);
+        term.update_selection(0, 3, Side::Right);
+
+        let mut buf = vec![0u32; w * h];
+        r.clear(&mut buf);
+        r.draw(&term, &mut buf, w, h, CursorLook::Hidden);
+        let line = buf[r.strikeout_y * w + cw + cw / 2];
+        assert_eq!(line, blend(fg, bg, DIM_ALPHA), "got {line:06x}");
+    }
+
+    #[test]
+    fn the_cursor_is_never_dimmed() {
+        let (fg, bg) = (0x00ff_ffff, 0x0000_0000);
+        let mut r = renderer();
+        r.set_colors(fg, bg);
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        let mut term = Terminal::new(TermSize::new(4, 2));
+        term.feed(b"\x1b[2m");
+
+        let mut buf = vec![0u32; w * h];
+        r.clear(&mut buf);
+        r.draw(&term, &mut buf, w, h, CursorLook::Beam);
+        assert_eq!(buf[(ch / 2) * w], fg);
     }
 
     #[test]
