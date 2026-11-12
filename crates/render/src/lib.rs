@@ -424,9 +424,7 @@ impl Renderer {
                 }
 
                 let span = if wide { 2 } else { 1 };
-                // A pane under two cells wide still gets a two-column grid, and
-                // `blit` clips to the buffer, not to the pane: a wide pair that
-                // does not fit would paint over the divider and the neighbour.
+                // `blit` clips to the buffer, not to the pane.
                 let fits = x0 + self.cell_w * span <= right;
                 fill_rect(
                     buf,
@@ -698,6 +696,9 @@ mod tests {
         let (cw, ch) = r.cell_size();
         let (w, h) = (cw * 4, ch * 2);
 
+        // The background fill is neither value, so this counts glyph ink alone.
+        let is_ink = |p: u32| p != 0 && p != DEFAULT_BG;
+
         for aw in [cw, 2 * cw - 1] {
             let mut buf = vec![0u32; w * h];
             r.draw_into(&term, &mut buf, w, h, (0, 0, aw, ch), CursorLook::Beam);
@@ -712,15 +713,19 @@ mod tests {
                 outside.len(),
                 outside.iter().max()
             );
+            assert_eq!(
+                buf.iter().copied().filter(|p| is_ink(*p)).count(),
+                0,
+                "area {aw}px wide drew a wide glyph it has no room for"
+            );
         }
 
         let mut buf = vec![0u32; w * h];
         r.draw_into(&term, &mut buf, w, h, (0, 0, 2 * cw, ch), CursorLook::Beam);
-        let inked = (0..ch)
-            .flat_map(|y| (0..2 * cw).map(move |x| (x, y)))
-            .filter(|&(x, y)| buf[y * w + x] != 0)
-            .count();
-        assert!(inked > 0, "two cells of room drew nothing");
+        assert!(
+            buf.iter().copied().filter(|p| is_ink(*p)).count() > 0,
+            "two cells of room drew no glyph"
+        );
     }
 
     #[test]
