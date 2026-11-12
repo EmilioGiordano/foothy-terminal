@@ -264,8 +264,8 @@ impl Renderer {
         let usable_w = width_px.saturating_sub(2 * self.pad);
         let usable_h = height_px.saturating_sub(2 * self.pad);
         TermSize::new(
-            (usable_w / self.cell_w).max(1),
-            (usable_h / self.cell_h).max(1),
+            (usable_w / self.cell_w).max(vt_core::MIN_COLUMNS),
+            (usable_h / self.cell_h).max(vt_core::MIN_SCREEN_LINES),
         )
     }
 
@@ -663,6 +663,45 @@ mod tests {
         let (cw, ch) = r.cell_size();
         let size = r.grid_size(cw * 80, ch * 24);
         assert_eq!(size, TermSize::new(80, 24));
+    }
+
+    #[test]
+    fn grid_size_never_goes_below_the_floor() {
+        for px in [8.0, 16.0, 400.0] {
+            let mut r = Renderer::new(&font_bytes(), px, &test_palette()).unwrap();
+            for pad in [0, 50] {
+                r.set_padding(pad);
+                for (w, h) in [(0, 0), (1, 1), (3, 3), (40, 40)] {
+                    let size = r.grid_size(w, h);
+                    assert!(
+                        size.columns >= vt_core::MIN_COLUMNS,
+                        "px {px} pad {pad} at {w}x{h}: {size:?}"
+                    );
+                    assert!(
+                        size.screen_lines >= vt_core::MIN_SCREEN_LINES,
+                        "px {px} pad {pad} at {w}x{h}: {size:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_grid_wider_than_its_area_stays_inside_the_buffer() {
+        let mut r = renderer();
+        let mut term = Terminal::new(TermSize::new(2, 1));
+        term.feed("中".as_bytes());
+        let (w, h) = (4, 4);
+        let mut buf = vec![0u32; w * h];
+        r.draw_into(
+            &term,
+            &mut buf,
+            w,
+            h,
+            (w - 1, h - 1, 1, 1),
+            CursorLook::Beam,
+        );
+        assert_eq!(buf.len(), w * h);
     }
 
     #[test]
