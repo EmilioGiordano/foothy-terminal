@@ -701,7 +701,7 @@ fn metrics(font: &Font, px: f32) -> Option<(usize, usize, i32)> {
 fn line_metrics(px: f32, baseline: i32, cell_h: usize) -> (usize, usize, usize) {
     let thickness = (px * 0.049).round().max(1.0) as usize;
     let last = cell_h.saturating_sub(thickness) as i32;
-    let under = (baseline + (px * 0.049).round().max(1.0) as i32).clamp(0, last);
+    let under = (baseline + thickness as i32).clamp(0, last);
     let strike = (baseline - (px * 0.31).round() as i32).clamp(0, last);
     (under as usize, strike as usize, thickness)
 }
