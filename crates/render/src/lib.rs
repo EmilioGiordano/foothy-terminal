@@ -691,17 +691,21 @@ mod tests {
         let mut r = renderer();
         let mut term = Terminal::new(TermSize::new(2, 1));
         term.feed("中".as_bytes());
-        let (w, h) = (4, 4);
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
         let mut buf = vec![0u32; w * h];
-        r.draw_into(
-            &term,
-            &mut buf,
-            w,
-            h,
-            (w - 1, h - 1, 1, 1),
-            CursorLook::Beam,
+        r.draw_into(&term, &mut buf, w, h, (0, 0, 1, 1), CursorLook::Beam);
+        let outside: Vec<usize> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .filter(|&(x, y)| (x > 0 || y > 0) && buf[y * w + x] != 0)
+            .map(|(x, _)| x)
+            .collect();
+        assert!(
+            outside.is_empty(),
+            "painted {} pixels outside a 1x1 area, up to x={:?}",
+            outside.len(),
+            outside.iter().max()
         );
-        assert_eq!(buf.len(), w * h);
     }
 
     #[test]
