@@ -462,16 +462,19 @@ mod tests {
     /// process is killed rather than left to the harness.
     fn within_five_seconds(name: &str, body: impl FnOnce() + Send + 'static) {
         let (done, wait) = channel();
-        std::thread::spawn(move || {
+        let worker = std::thread::spawn(move || {
             body();
             let _ = done.send(());
         });
-        if wait
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .is_err()
-        {
-            eprintln!("{name} did not return in 5s: the column floor is gone");
-            std::process::exit(1);
+        match wait.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                std::panic::resume_unwind(worker.join().unwrap_err())
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                eprintln!("{name} did not return in 5s: the column floor is gone");
+                std::process::exit(1);
+            }
         }
     }
 
