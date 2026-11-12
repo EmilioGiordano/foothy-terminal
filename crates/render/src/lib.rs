@@ -1335,6 +1335,42 @@ mod tests {
     }
 
     #[test]
+    fn bold_dilates_every_row_rightwards_and_nowhere_else() {
+        use std::collections::BTreeSet;
+
+        let mut r = renderer();
+        let dilate = (r.font_size() / 16.0).round().max(1.0) as usize;
+        for c in "MH".chars() {
+            let plain = {
+                let g = r.glyph(c, 0);
+                (g.left, g.width, g.height, g.coverage.clone())
+            };
+            let bold = {
+                let g = r.glyph(c, STYLE_BOLD);
+                (g.left, g.width, g.height, g.coverage.clone())
+            };
+            assert_eq!(bold.0, plain.0, "{c:?} moved its left edge");
+            assert_eq!(
+                bold.1,
+                plain.1 + dilate,
+                "{c:?} was clipped, so a shift cannot show"
+            );
+            assert_eq!(bold.2, plain.2, "{c:?} changed height");
+
+            for gy in 0..plain.2 {
+                let want: BTreeSet<usize> = (0..plain.1)
+                    .filter(|&gx| plain.3[gy * plain.1 + gx] != 0)
+                    .flat_map(|gx| (0..=dilate).map(move |k| gx + k))
+                    .collect();
+                let got: BTreeSet<usize> = (0..bold.1)
+                    .filter(|&gx| bold.3[gy * bold.1 + gx] != 0)
+                    .collect();
+                assert_eq!(got, want, "{c:?} row {gy} landed elsewhere");
+            }
+        }
+    }
+
+    #[test]
     fn bold_stays_inside_the_cell_the_glyph_already_used() {
         let mut r = renderer();
         let (cw, _) = r.cell_size();
