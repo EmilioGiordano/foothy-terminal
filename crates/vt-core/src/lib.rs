@@ -15,6 +15,7 @@ pub use alacritty_terminal::event::Event as TermEvent;
 pub use alacritty_terminal::grid::Scroll;
 pub use alacritty_terminal::index::Side;
 pub use alacritty_terminal::selection::{SelectionRange, SelectionType};
+pub use alacritty_terminal::term::MIN_COLUMNS;
 pub use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle};
 
 #[derive(Clone)]
@@ -32,11 +33,22 @@ pub struct TermSize {
     pub screen_lines: usize,
 }
 
+pub const MIN_SCREEN_LINES: usize = 1;
+
 impl TermSize {
     pub fn new(columns: usize, screen_lines: usize) -> Self {
         Self {
             columns,
             screen_lines,
+        }
+    }
+
+    // One column hangs `Grid::shrink_columns` forever on a wide character, and
+    // no row panics the first write at `grid/storage.rs:221`.
+    fn floored(self) -> Self {
+        Self {
+            columns: self.columns.max(MIN_COLUMNS),
+            screen_lines: self.screen_lines.max(MIN_SCREEN_LINES),
         }
     }
 }
@@ -87,7 +99,7 @@ impl Terminal {
 
     pub fn with_config(size: TermSize, config: Config) -> Self {
         let (tx, events) = channel();
-        let term = Term::new(config, &size, EventSink(tx));
+        let term = Term::new(config, &size.floored(), EventSink(tx));
         Self {
             term,
             parser: Processor::new(),
@@ -137,8 +149,9 @@ impl Terminal {
         out
     }
 
+    /// Clamped to at least [`MIN_COLUMNS`]; [`Terminal::size`] is what it took.
     pub fn resize(&mut self, size: TermSize) {
-        self.term.resize(size);
+        self.term.resize(size.floored());
     }
 
     pub fn scroll(&mut self, scroll: Scroll) {
@@ -443,5 +456,55 @@ mod tests {
         t.resize(TermSize::new(40, 10));
         assert_eq!(t.size(), TermSize::new(40, 10));
         assert_eq!(t.line_text(0), "word");
+    }
+
+    /// A hang here would allocate ~250 MB/s until the machine dies, so the
+    /// process is killed rather than left to the harness.
+    fn within_five_seconds(name: &str, body: impl FnOnce() + Send + 'static) {
+        let (done, wait) = channel();
+        std::thread::spawn(move || {
+            body();
+            let _ = done.send(());
+        });
+        if wait
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .is_err()
+        {
+            eprintln!("{name} did not return in 5s: the column floor is gone");
+            std::process::exit(1);
+        }
+    }
+
+    #[test]
+    fn narrow_resize_with_a_wide_char_returns() {
+        within_five_seconds("narrow_resize_with_a_wide_char_returns", || {
+            let mut t = Terminal::new(TermSize::new(2, 1));
+            t.feed("中".as_bytes());
+            t.resize(TermSize::new(1, 1));
+            assert_eq!(t.size().columns, MIN_COLUMNS);
+            t.resize(TermSize::new(0, 0));
+            assert_eq!(t.size(), TermSize::new(MIN_COLUMNS, MIN_SCREEN_LINES));
+        });
+    }
+
+    #[test]
+    fn a_narrow_terminal_cannot_be_constructed() {
+        for columns in [0, 1] {
+            let mut t = Terminal::new(TermSize::new(columns, 0));
+            assert_eq!(t.size(), TermSize::new(MIN_COLUMNS, MIN_SCREEN_LINES));
+            t.feed("中".as_bytes());
+            assert_eq!(t.line_text(0), "中");
+        }
+    }
+
+    #[test]
+    fn a_narrow_scrollback_survives_the_floor() {
+        within_five_seconds("a_narrow_scrollback_survives_the_floor", || {
+            let mut t = Terminal::new(TermSize::new(4, 1));
+            t.feed("中\r\n".as_bytes());
+            t.feed(b"ab");
+            t.resize(TermSize::new(1, 1));
+            assert_eq!(t.size().columns, MIN_COLUMNS);
+        });
     }
 }
