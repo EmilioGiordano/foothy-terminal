@@ -1368,6 +1368,38 @@ mod tests {
     }
 
     #[test]
+    fn the_slant_keeps_the_top_of_a_glyph_that_reaches_the_cell_edge() {
+        let mut r = renderer();
+        let (cw, ch) = r.cell_size();
+        let w = cw * 4;
+        let top_ink = |r: &mut Renderer, sgr: &str, c: char| {
+            let buf = frame(r, sgr, &c.to_string());
+            (0..ch / 3)
+                .flat_map(|y| (0..cw).map(move |x| (x, y)))
+                .filter(|&(x, y)| buf[y * w + x] != DEFAULT_BG)
+                .count()
+        };
+        for c in "MHX@".chars() {
+            let (left, width) = {
+                let g = r.glyph(c, 0);
+                (g.left, g.width as i32)
+            };
+            assert!(
+                left + width >= cw as i32 - 1,
+                "{c:?} stops {}px short of the cell edge, the clip cannot bite",
+                cw as i32 - left - width
+            );
+            let plain = top_ink(&mut r, "", c);
+            assert!(plain > 0, "{c:?} inked nothing in its top third");
+            assert_eq!(
+                top_ink(&mut r, "\x1b[3m", c),
+                plain,
+                "{c:?} lost ink from its top third to the clip"
+            );
+        }
+    }
+
+    #[test]
     fn bold_italic_is_neither_bold_nor_italic() {
         let mut r = renderer();
         let plain = frame(&mut r, "", "X");
