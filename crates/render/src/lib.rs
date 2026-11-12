@@ -558,7 +558,7 @@ impl Renderer {
 
                 // Spaces carry them too, so this cannot live under the blit.
                 if styled {
-                    self.draw_lines(buf, width, height, x0, y0, span, flags, fg);
+                    self.draw_lines(buf, width, height, x0, y0, span, right, flags, fg);
                 }
 
                 if on_cursor {
@@ -577,10 +577,13 @@ impl Renderer {
         x0: usize,
         y0: usize,
         span: usize,
+        right: usize,
         flags: Flags,
         fg: u32,
     ) {
-        let w = self.cell_w * span;
+        // The column loop only fits one cell inside the pane, so a wide pair's
+        // second cell can fall outside it and `fill_rect` clips to the buffer.
+        let w = (self.cell_w * span).min(right.saturating_sub(x0));
         if flags.intersects(Flags::ALL_UNDERLINES) {
             let y = y0 + self.underline_y;
             fill_rect(buf, width, height, x0, y, w, self.line_thickness, fg);
@@ -1217,6 +1220,33 @@ mod tests {
         assert!(lit(0), "the leading half is unmarked");
         assert!(lit(1), "the trailing half is unmarked");
         assert!(!lit(2), "the lines ran past the wide cell");
+    }
+
+    #[test]
+    fn the_lines_stay_inside_a_pane_narrower_than_the_wide_cell() {
+        let (fg, bg) = (0x00ff_ffff, 0x0000_0000);
+        let mut r = renderer();
+        r.set_colors(fg, bg);
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        let mut term = Terminal::new(TermSize::new(2, 1));
+        term.feed("\x1b[4;9m中".as_bytes());
+
+        for aw in [cw, 2 * cw - 1] {
+            let mut buf = vec![0u32; w * h];
+            r.draw_into(&term, &mut buf, w, h, (0, 0, aw, ch), CursorLook::Hidden);
+            let outside: Vec<usize> = (0..h)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .filter(|&(x, y)| (x >= aw || y >= ch) && buf[y * w + x] == fg)
+                .map(|(x, _)| x)
+                .collect();
+            assert!(
+                outside.is_empty(),
+                "a pane {aw}px wide painted {} foreground pixels outside it, up to x={:?}",
+                outside.len(),
+                outside.iter().max()
+            );
+        }
     }
 
     #[test]
