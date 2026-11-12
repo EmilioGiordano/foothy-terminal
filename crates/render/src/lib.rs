@@ -264,8 +264,8 @@ impl Renderer {
         let usable_w = width_px.saturating_sub(2 * self.pad);
         let usable_h = height_px.saturating_sub(2 * self.pad);
         TermSize::new(
-            (usable_w / self.cell_w).max(1),
-            (usable_h / self.cell_h).max(1),
+            (usable_w / self.cell_w).max(vt_core::MIN_COLUMNS),
+            (usable_h / self.cell_h).max(vt_core::MIN_SCREEN_LINES),
         )
     }
 
@@ -424,18 +424,20 @@ impl Renderer {
                 }
 
                 let span = if wide { 2 } else { 1 };
+                // `blit` clips to the buffer, not to the pane.
+                let fits = x0 + self.cell_w * span <= right;
                 fill_rect(
                     buf,
                     width,
                     height,
                     x0,
                     y0,
-                    self.cell_w * span,
+                    (self.cell_w * span).min(right - x0),
                     self.cell_h,
                     bg,
                 );
 
-                if ch != ' ' && ch != '\0' {
+                if fits && ch != ' ' && ch != '\0' {
                     self.blit(buf, width, height, x0, y0, ch, fg, bg);
                 }
 
@@ -663,6 +665,67 @@ mod tests {
         let (cw, ch) = r.cell_size();
         let size = r.grid_size(cw * 80, ch * 24);
         assert_eq!(size, TermSize::new(80, 24));
+    }
+
+    #[test]
+    fn grid_size_never_goes_below_the_floor() {
+        for px in [8.0, 16.0, 400.0] {
+            let mut r = Renderer::new(&font_bytes(), px, &test_palette()).unwrap();
+            for pad in [0, 50] {
+                r.set_padding(pad);
+                for (w, h) in [(0, 0), (1, 1), (3, 3), (40, 40)] {
+                    let size = r.grid_size(w, h);
+                    assert!(
+                        size.columns >= vt_core::MIN_COLUMNS,
+                        "px {px} pad {pad} at {w}x{h}: {size:?}"
+                    );
+                    assert!(
+                        size.screen_lines >= vt_core::MIN_SCREEN_LINES,
+                        "px {px} pad {pad} at {w}x{h}: {size:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_wide_glyph_stays_inside_its_pane() {
+        let mut r = renderer();
+        let mut term = Terminal::new(TermSize::new(2, 1));
+        term.feed("中".as_bytes());
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+
+        // The background fill is neither value, so this counts glyph ink alone.
+        let is_ink = |p: u32| p != 0 && p != DEFAULT_BG;
+
+        for aw in [cw, 2 * cw - 1] {
+            let mut buf = vec![0u32; w * h];
+            r.draw_into(&term, &mut buf, w, h, (0, 0, aw, ch), CursorLook::Beam);
+            let outside: Vec<usize> = (0..h)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .filter(|&(x, y)| (x >= aw || y >= ch) && buf[y * w + x] != 0)
+                .map(|(x, _)| x)
+                .collect();
+            assert!(
+                outside.is_empty(),
+                "area {aw}px wide painted {} pixels outside it, up to x={:?}",
+                outside.len(),
+                outside.iter().max()
+            );
+            assert_eq!(
+                buf.iter().copied().filter(|p| is_ink(*p)).count(),
+                0,
+                "area {aw}px wide drew a wide glyph it has no room for"
+            );
+        }
+
+        let mut buf = vec![0u32; w * h];
+        r.draw_into(&term, &mut buf, w, h, (0, 0, 2 * cw, ch), CursorLook::Beam);
+        assert!(
+            buf.iter().copied().filter(|p| is_ink(*p)).count() > 0,
+            "two cells of room drew no glyph"
+        );
     }
 
     #[test]

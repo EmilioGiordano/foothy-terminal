@@ -532,12 +532,16 @@ impl App {
         for (id, rect) in rects {
             let (_, term_area) = self.panes.chrome(rect, show);
             let size = self.renderer.grid_size(term_area.w, term_area.h);
-            if let Some(pane) = self.panes.panes.get_mut(&id)
-                && pane.term.size() != size
-            {
+            if let Some(pane) = self.panes.panes.get_mut(&id) {
+                let before = pane.term.size();
                 pane.term.resize(size);
-                if let Some(pty) = pane.pty.as_ref() {
-                    let _ = pty.resize(size);
+                let after = pane.term.size();
+                // The grid clamps its width, so the PTY must follow what it took:
+                // given the unclamped size the shell draws at the wrong width.
+                if after != before
+                    && let Some(pty) = pane.pty.as_ref()
+                {
+                    let _ = pty.resize(after);
                 }
             }
         }
@@ -1327,8 +1331,8 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::Resized(size) => {
-                // Minimising reports 0x0; resizing to it clamps every grid to one
-                // column and reflows the scrollback through it, destroying it.
+                // Minimising reports 0x0; resizing to it reflows every scrollback
+                // through the minimum grid, destroying it.
                 if size.width == 0 || size.height == 0 {
                     return;
                 }
