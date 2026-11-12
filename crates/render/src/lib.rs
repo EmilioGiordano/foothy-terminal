@@ -1139,23 +1139,23 @@ mod tests {
         assert_eq!(slab(&mut r), 0x0000_0000);
     }
 
-    /// Draws `sgr` into a one-row grid and returns the rows of the first cell
-    /// that hold a pixel the same cell drew without the attribute.
     fn added_rows(sgr: &str, text: &str) -> Vec<usize> {
         let mut r = renderer();
         let (cw, ch) = r.cell_size();
         let (w, h) = (cw * 4, ch * 2);
+        // One grid row inside a taller buffer: with a second row the next row's
+        // own background fill would hide anything spilling below the cell.
         let frame = |r: &mut Renderer, prefix: &str| {
-            let mut term = Terminal::new(TermSize::new(4, 2));
+            let mut term = Terminal::new(TermSize::new(4, 1));
             term.feed(format!("{prefix}{text}").as_bytes());
             let mut buf = vec![0u32; w * h];
             r.clear(&mut buf);
-            r.draw(&term, &mut buf, w, h, CursorLook::Hidden);
+            r.draw_into(&term, &mut buf, w, h, (0, 0, w, ch), CursorLook::Hidden);
             buf
         };
         let plain = frame(&mut r, "");
         let styled = frame(&mut r, sgr);
-        (0..ch)
+        (0..h)
             .filter(|&y| (0..cw).any(|x| styled[y * w + x] != plain[y * w + x]))
             .collect()
     }
@@ -1209,17 +1209,37 @@ mod tests {
     fn the_lines_follow_the_cell_into_a_second_column_when_the_char_is_wide() {
         let mut r = renderer();
         let (cw, ch) = r.cell_size();
-        let (w, h) = (cw * 6, ch * 2);
-        let mut term = Terminal::new(TermSize::new(6, 2));
-        term.feed("\x1b[4;9m中".as_bytes());
-        let mut buf = vec![0u32; w * h];
-        r.clear(&mut buf);
-        r.draw(&term, &mut buf, w, h, CursorLook::Hidden);
+        let (w, h) = (cw * 4, ch * 2);
+        // Two columns in a wider pane, one grid row: a cell drawn after this one
+        // would erase an overrun with its own background fill.
+        let aw = cw * 3;
+        let shot = |r: &mut Renderer, prefix: &str| {
+            let mut term = Terminal::new(TermSize::new(2, 1));
+            term.feed(format!("{prefix}中").as_bytes());
+            let mut buf = vec![0u32; w * h];
+            r.clear(&mut buf);
+            r.draw_into(&term, &mut buf, w, h, (0, 0, aw, ch), CursorLook::Hidden);
+            buf
+        };
+        let plain = shot(&mut r, "");
+        let styled = shot(&mut r, "\x1b[4;9m");
 
-        let lit = |col: usize| (0..ch).any(|y| buf[y * w + col * cw + cw / 2] != DEFAULT_BG);
-        assert!(lit(0), "the leading half is unmarked");
-        assert!(lit(1), "the trailing half is unmarked");
-        assert!(!lit(2), "the lines ran past the wide cell");
+        let ox = (aw - 2 * cw) / 2;
+        // The underline row, which the glyph does not reach: on the strikeout row
+        // ink already at full foreground cannot show the line.
+        let y = r.underline_y;
+        let marked: Vec<usize> = (0..w)
+            .filter(|&x| styled[y * w + x] != plain[y * w + x])
+            .collect();
+        assert_eq!(
+            marked,
+            (ox..ox + 2 * cw).collect::<Vec<_>>(),
+            "the underline does not cover the wide pair"
+        );
+        assert!(
+            !(ch..h).any(|y| (0..w).any(|x| styled[y * w + x] != plain[y * w + x])),
+            "the lines spilled below the cell"
+        );
     }
 
     #[test]
