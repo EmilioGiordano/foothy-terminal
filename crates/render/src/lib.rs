@@ -47,8 +47,6 @@ pub use builtin::BUILTIN as SYNTHESISED_GLYPHS;
 /// `t = 1 - 1/amount`.
 const DIM_ALPHA: u8 = 170;
 
-/// The gate for every attribute below: a cell carrying none of them must not
-/// pay for the styled path.
 const STYLED: Flags = Flags::BOLD
     .union(Flags::ITALIC)
     .union(Flags::DIM)
@@ -104,9 +102,8 @@ fn restyle(g: &Glyph, style: u8, px: f32, cell_w: usize) -> Glyph {
         back = back.min(sheared(gy));
         ahead = ahead.max(sheared(gy));
     }
-    // Centred on the glyph's own ink: shearing about the baseline alone pushes
-    // every row right, and the widest glyphs then lose their top stem to the
-    // clip below.
+    // Sheared about the baseline alone, a glyph that reaches the cell edge loses
+    // its top stem to the clip below.
     let bias = (ahead + back) / 2;
     let slant = |gy: usize| sheared(gy) - bias;
     back -= bias;
@@ -581,8 +578,8 @@ impl Renderer {
         flags: Flags,
         fg: u32,
     ) {
-        // The column loop only fits one cell inside the pane, so a wide pair's
-        // second cell can fall outside it and `fill_rect` clips to the buffer.
+        // The column loop fits one cell in the pane, not the pair, and `fill_rect`
+        // clips to the buffer.
         let w = (self.cell_w * span).min(right.saturating_sub(x0));
         if flags.intersects(Flags::ALL_UNDERLINES) {
             let y = y0 + self.underline_y;
@@ -700,8 +697,7 @@ fn metrics(font: &Font, px: f32) -> Option<(usize, usize, i32)> {
 }
 
 /// Fractions of the em, which is what `px` measures: fontdue exposes no
-/// underline or strikeout metrics. Clamped so a line cannot land outside the
-/// cell.
+/// underline or strikeout metrics.
 fn line_metrics(px: f32, baseline: i32, cell_h: usize) -> (usize, usize, usize) {
     let thickness = (px * 0.049).round().max(1.0) as usize;
     let last = cell_h.saturating_sub(thickness) as i32;
@@ -1180,8 +1176,6 @@ mod tests {
 
     #[test]
     fn every_underline_style_draws_a_line() {
-        // Double, curly, dotted and dashed all come out single: better a line
-        // than nothing until they are drawn properly.
         for sgr in [
             "\x1b[4m",
             "\x1b[4:2m",
@@ -1297,7 +1291,6 @@ mod tests {
         buf
     }
 
-    /// Pixels of the first cell that are not the background.
     fn inked(r: &mut Renderer, sgr: &str, text: &str) -> usize {
         let (cw, ch) = r.cell_size();
         let w = cw * 4;
@@ -1401,7 +1394,6 @@ mod tests {
         }
     }
 
-    /// Mean x of the inked pixels in the top third of the first cell.
     fn top_centre(r: &mut Renderer, sgr: &str) -> f32 {
         let (cw, ch) = r.cell_size();
         let w = cw * 4;
@@ -1551,8 +1543,6 @@ mod tests {
 
     #[test]
     fn dim_under_inverse_fades_towards_the_cell_it_is_drawn_on() {
-        // Inverse swaps the pair first, so dim always walks towards whatever
-        // this cell actually paints behind the text.
         let (fg, bg) = (0x00ff_ffff, 0x0000_0000);
         let dim = struck_pixel("\x1b[7;2;9m", fg, bg);
         assert_eq!(dim, blend(fg, bg, DIM_ALPHA));
