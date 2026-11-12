@@ -1243,12 +1243,28 @@ mod tests {
         r.set_colors(fg, bg);
         let (cw, ch) = r.cell_size();
         let (w, h) = (cw * 4, ch * 2);
-        let mut term = Terminal::new(TermSize::new(2, 1));
-        term.feed("\x1b[4;9m中".as_bytes());
-
-        for aw in [cw, 2 * cw - 1] {
+        let shot = |r: &mut Renderer, prefix: &str, aw: usize| {
+            let mut term = Terminal::new(TermSize::new(2, 1));
+            term.feed(format!("{prefix}中").as_bytes());
             let mut buf = vec![0u32; w * h];
             r.draw_into(&term, &mut buf, w, h, (0, 0, aw, ch), CursorLook::Hidden);
+            buf
+        };
+
+        for aw in [cw, 2 * cw - 1] {
+            let plain = shot(&mut r, "", aw);
+            let buf = shot(&mut r, "\x1b[4;9m", aw);
+
+            let y = r.underline_y;
+            let marked: Vec<usize> = (0..w)
+                .filter(|&x| buf[y * w + x] != plain[y * w + x])
+                .collect();
+            assert_eq!(
+                marked,
+                (0..aw).collect::<Vec<_>>(),
+                "a pane {aw}px wide did not underline every pixel of it"
+            );
+
             let outside: Vec<usize> = (0..h)
                 .flat_map(|y| (0..w).map(move |x| (x, y)))
                 .filter(|&(x, y)| (x >= aw || y >= ch) && buf[y * w + x] == fg)
