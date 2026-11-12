@@ -15,7 +15,7 @@ pub use alacritty_terminal::event::Event as TermEvent;
 pub use alacritty_terminal::grid::Scroll;
 pub use alacritty_terminal::index::Side;
 pub use alacritty_terminal::selection::{SelectionRange, SelectionType};
-pub use alacritty_terminal::term::MIN_COLUMNS;
+pub use alacritty_terminal::term::{MIN_COLUMNS, MIN_SCREEN_LINES};
 pub use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle};
 
 #[derive(Clone)]
@@ -33,8 +33,6 @@ pub struct TermSize {
     pub screen_lines: usize,
 }
 
-pub const MIN_SCREEN_LINES: usize = 1;
-
 impl TermSize {
     pub fn new(columns: usize, screen_lines: usize) -> Self {
         Self {
@@ -44,7 +42,7 @@ impl TermSize {
     }
 
     // One column hangs `Grid::shrink_columns` forever on a wide character, and
-    // no row panics the first write at `grid/storage.rs:221`.
+    // no row panics the first write.
     fn floored(self) -> Self {
         Self {
             columns: self.columns.max(MIN_COLUMNS),
@@ -276,6 +274,8 @@ impl Terminal {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
 
     fn term() -> Terminal {
@@ -472,7 +472,12 @@ mod tests {
                 std::panic::resume_unwind(worker.join().unwrap_err())
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                eprintln!("{name} did not return in 5s: the column floor is gone");
+                // libtest captures `eprintln!` and `exit` throws the buffer away,
+                // which would leave the regression reported as a bare exit code.
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "{name} did not return in 5s: the column floor is gone"
+                );
                 std::process::exit(1);
             }
         }
@@ -501,13 +506,15 @@ mod tests {
     }
 
     #[test]
-    fn a_narrow_scrollback_survives_the_floor() {
-        within_five_seconds("a_narrow_scrollback_survives_the_floor", || {
+    fn a_wide_char_in_the_scrollback_survives_the_floor() {
+        within_five_seconds("a_wide_char_in_the_scrollback_survives_the_floor", || {
             let mut t = Terminal::new(TermSize::new(4, 1));
             t.feed("中\r\n".as_bytes());
             t.feed(b"ab");
             t.resize(TermSize::new(1, 1));
             assert_eq!(t.size().columns, MIN_COLUMNS);
+            t.scroll(Scroll::Delta(1));
+            assert_eq!(t.line_text(0), "中");
         });
     }
 }
