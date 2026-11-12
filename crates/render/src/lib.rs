@@ -424,18 +424,22 @@ impl Renderer {
                 }
 
                 let span = if wide { 2 } else { 1 };
+                // A pane under two cells wide still gets a two-column grid, and
+                // `blit` clips to the buffer, not to the pane: a wide pair that
+                // does not fit would paint over the divider and the neighbour.
+                let fits = x0 + self.cell_w * span <= right;
                 fill_rect(
                     buf,
                     width,
                     height,
                     x0,
                     y0,
-                    self.cell_w * span,
+                    (self.cell_w * span).min(right - x0),
                     self.cell_h,
                     bg,
                 );
 
-                if ch != ' ' && ch != '\0' {
+                if fits && ch != ' ' && ch != '\0' {
                     self.blit(buf, width, height, x0, y0, ch, fg, bg);
                 }
 
@@ -687,25 +691,36 @@ mod tests {
     }
 
     #[test]
-    fn a_grid_wider_than_its_area_stays_inside_the_buffer() {
+    fn a_wide_glyph_stays_inside_its_pane() {
         let mut r = renderer();
         let mut term = Terminal::new(TermSize::new(2, 1));
         term.feed("中".as_bytes());
         let (cw, ch) = r.cell_size();
         let (w, h) = (cw * 4, ch * 2);
+
+        for aw in [cw, 2 * cw - 1] {
+            let mut buf = vec![0u32; w * h];
+            r.draw_into(&term, &mut buf, w, h, (0, 0, aw, ch), CursorLook::Beam);
+            let outside: Vec<usize> = (0..h)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .filter(|&(x, y)| (x >= aw || y >= ch) && buf[y * w + x] != 0)
+                .map(|(x, _)| x)
+                .collect();
+            assert!(
+                outside.is_empty(),
+                "area {aw}px wide painted {} pixels outside it, up to x={:?}",
+                outside.len(),
+                outside.iter().max()
+            );
+        }
+
         let mut buf = vec![0u32; w * h];
-        r.draw_into(&term, &mut buf, w, h, (0, 0, 1, 1), CursorLook::Beam);
-        let outside: Vec<usize> = (0..h)
-            .flat_map(|y| (0..w).map(move |x| (x, y)))
-            .filter(|&(x, y)| (x > 0 || y > 0) && buf[y * w + x] != 0)
-            .map(|(x, _)| x)
-            .collect();
-        assert!(
-            outside.is_empty(),
-            "painted {} pixels outside a 1x1 area, up to x={:?}",
-            outside.len(),
-            outside.iter().max()
-        );
+        r.draw_into(&term, &mut buf, w, h, (0, 0, 2 * cw, ch), CursorLook::Beam);
+        let inked = (0..ch)
+            .flat_map(|y| (0..2 * cw).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[y * w + x] != 0)
+            .count();
+        assert!(inked > 0, "two cells of room drew nothing");
     }
 
     #[test]
