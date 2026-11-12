@@ -1438,6 +1438,30 @@ mod tests {
     }
 
     #[test]
+    fn dim_alone_fades_the_glyph_of_a_cell_carrying_no_other_attribute() {
+        let (fg, bg) = (0x00ff_ffff, 0x0000_0000);
+        let mut r = renderer();
+        r.set_colors(fg, bg);
+        let (cw, ch) = r.cell_size();
+        let w = cw * 4;
+        let plain = frame(&mut r, "", "X");
+        let dim = frame(&mut r, "\x1b[2m", "X");
+
+        let solid: Vec<usize> = (0..ch)
+            .flat_map(|y| (0..cw).map(move |x| y * w + x))
+            .filter(|&i| plain[i] == fg)
+            .collect();
+        assert!(!solid.is_empty(), "the glyph inked nothing to compare");
+        for i in solid {
+            assert_eq!(
+                dim[i],
+                blend(bg, fg, DIM_ALPHA),
+                "pixel {i} kept the full foreground"
+            );
+        }
+    }
+
+    #[test]
     fn dim_under_inverse_fades_towards_the_cell_it_is_drawn_on() {
         // Inverse swaps the pair first, so dim always walks towards whatever
         // this cell actually paints behind the text.
