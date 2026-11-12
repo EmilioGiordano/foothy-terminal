@@ -43,6 +43,105 @@ mod builtin;
 /// choosing glyphs can rely on these being drawable whatever font is loaded.
 pub use builtin::BUILTIN as SYNTHESISED_GLYPHS;
 
+/// foot's default `dim-amount=1.5` as a blend weight: `render.c:282` computes
+/// `t = 1 - 1/amount`.
+const DIM_ALPHA: u8 = 170;
+
+const STYLED: Flags = Flags::BOLD
+    .union(Flags::ITALIC)
+    .union(Flags::DIM)
+    .union(Flags::STRIKEOUT)
+    .union(Flags::ALL_UNDERLINES);
+
+const STYLE_BOLD: u8 = 1;
+const STYLE_ITALIC: u8 = 2;
+
+const ITALIC_SHEAR: f32 = 0.2;
+
+fn style_bits(flags: Flags) -> u8 {
+    let mut style = 0;
+    if flags.contains(Flags::BOLD) {
+        style |= STYLE_BOLD;
+    }
+    if flags.contains(Flags::ITALIC) {
+        style |= STYLE_ITALIC;
+    }
+    style
+}
+
+/// A styled glyph rasterises differently, so the style has to be part of the
+/// cache key or a bold cell is served the regular bitmap.
+fn glyph_key(c: char, style: u8) -> u32 {
+    c as u32 | (style as u32) << 24
+}
+
+/// Box drawing, blocks and the Powerline arrows: thickening or slanting these
+/// breaks lines that have to meet across the cell edge.
+fn is_line_art(c: char) -> bool {
+    matches!(c, '\u{2500}'..='\u{259f}' | '\u{e0b0}'..='\u{e0d4}')
+}
+
+/// Clipped to the cell the glyph already occupied: `blit` overwrites instead of
+/// blending, so ink reaching left would punch a hole in the neighbour that is
+/// already drawn, and ink reaching right would leave the pane.
+fn restyle(g: &Glyph, style: u8, px: f32, cell_w: usize) -> Glyph {
+    let dilate = if style & STYLE_BOLD != 0 {
+        (px / 16.0).round().max(1.0) as i32
+    } else {
+        0
+    };
+    let shear = if style & STYLE_ITALIC != 0 {
+        ITALIC_SHEAR
+    } else {
+        0.0
+    };
+    let sheared = |gy: usize| (shear * (g.top - gy as i32) as f32).round() as i32;
+    let mut back = 0;
+    let mut ahead = 0;
+    for gy in 0..g.height {
+        back = back.min(sheared(gy));
+        ahead = ahead.max(sheared(gy));
+    }
+    // Sheared about the baseline alone, a glyph that reaches the cell edge loses
+    // its top stem to the clip below.
+    let bias = (ahead + back) / 2;
+    let slant = |gy: usize| sheared(gy) - bias;
+    back -= bias;
+    ahead -= bias;
+
+    let lo = g.left.min(0);
+    let hi = (g.left + g.width as i32).max(cell_w as i32);
+    let left = (g.left + back).max(lo);
+    let right = (g.left + ahead + g.width as i32 + dilate).min(hi);
+    let width = (right - left).max(0) as usize;
+
+    let mut coverage = vec![0u8; width * g.height];
+    for gy in 0..g.height {
+        let d = slant(gy);
+        for gx in 0..g.width {
+            let a = g.coverage[gy * g.width + gx];
+            if a == 0 {
+                continue;
+            }
+            for k in 0..=dilate {
+                let x = g.left + d + gx as i32 + k - left;
+                if (0..width as i32).contains(&x) {
+                    let slot = &mut coverage[gy * width + x as usize];
+                    *slot = (*slot).max(a);
+                }
+            }
+        }
+    }
+
+    Glyph {
+        width,
+        height: g.height,
+        left,
+        top: g.top,
+        coverage,
+    }
+}
+
 struct Glyph {
     width: usize,
     height: usize,
@@ -57,8 +156,11 @@ pub struct Renderer {
     cell_w: usize,
     cell_h: usize,
     baseline: i32,
+    underline_y: usize,
+    strikeout_y: usize,
+    line_thickness: usize,
     palette: [u32; 256],
-    glyphs: HashMap<char, Glyph>,
+    glyphs: HashMap<u32, Glyph>,
     pad: usize,
     fg: u32,
     bg: u32,
@@ -79,6 +181,7 @@ impl Renderer {
 
         let (cell_w, cell_h, baseline) = metrics(&font, px)
             .ok_or_else(|| anyhow::anyhow!("font has no horizontal line metrics"))?;
+        let (underline_y, strikeout_y, line_thickness) = line_metrics(px, baseline, cell_h);
 
         Ok(Self {
             font,
@@ -86,6 +189,9 @@ impl Renderer {
             cell_w,
             cell_h,
             baseline,
+            underline_y,
+            strikeout_y,
+            line_thickness,
             palette: *palette,
             glyphs: HashMap::new(),
             pad: 0,
@@ -113,10 +219,14 @@ impl Renderer {
         let Some((cell_w, cell_h, baseline)) = metrics(&self.font, px) else {
             return false;
         };
+        let (underline_y, strikeout_y, line_thickness) = line_metrics(px, baseline, cell_h);
         self.px = px;
         self.cell_w = cell_w;
         self.cell_h = cell_h;
         self.baseline = baseline;
+        self.underline_y = underline_y;
+        self.strikeout_y = strikeout_y;
+        self.line_thickness = line_thickness;
         self.glyphs.clear();
         true
     }
@@ -163,7 +273,7 @@ impl Renderer {
                 break;
             }
             if ch != ' ' {
-                self.blit(buf, width, height, pen, y, ch, fg, bg);
+                self.blit(buf, width, height, pen, y, ch, 0, fg, bg);
             }
             pen += self.cell_w;
         }
@@ -269,12 +379,12 @@ impl Renderer {
         )
     }
 
-    fn glyph(&mut self, c: char) -> &Glyph {
+    fn glyph(&mut self, c: char, style: u8) -> &Glyph {
         let (cell_w, cell_h, baseline) = (self.cell_w, self.cell_h, self.baseline);
         let (font, px) = (&self.font, self.px);
         // Everything costly stays in the vacant arm: this runs once per cell per
         // frame, and a cache hit must not pay for a font lookup.
-        match self.glyphs.entry(c) {
+        match self.glyphs.entry(glyph_key(c, style)) {
             Entry::Occupied(hit) => hit.into_mut(),
             Entry::Vacant(slot) => {
                 let glyph = if font.lookup_glyph_index(c) == 0
@@ -291,12 +401,17 @@ impl Renderer {
                     }
                 } else {
                     let (m, coverage) = font.rasterize(c, px);
-                    Glyph {
+                    let plain = Glyph {
                         width: m.width,
                         height: m.height,
                         left: m.xmin,
                         top: m.height as i32 + m.ymin,
                         coverage,
+                    };
+                    if style != 0 && !is_line_art(c) {
+                        restyle(&plain, style, px, cell_w)
+                    } else {
+                        plain
                     }
                 };
                 slot.insert(glyph)
@@ -384,10 +499,11 @@ impl Renderer {
                     break;
                 }
 
-                let (ch, mut fg, mut bg, wide, skip) = {
+                let (ch, mut fg, mut bg, wide, skip, flags) = {
                     let cell =
                         &term.term().grid()[Point::new(Line(row as i32 - offset), Column(col))];
-                    let inverse = cell.flags.contains(Flags::INVERSE);
+                    let flags = cell.flags;
+                    let inverse = flags.contains(Flags::INVERSE);
                     let (f, b) = if inverse {
                         (
                             self.resolve(cell.bg, self.bg),
@@ -403,9 +519,9 @@ impl Renderer {
                         cell.c,
                         f,
                         b,
-                        cell.flags.contains(Flags::WIDE_CHAR),
-                        cell.flags
-                            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
+                        flags.contains(Flags::WIDE_CHAR),
+                        flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
+                        flags,
                     )
                 };
 
@@ -435,14 +551,56 @@ impl Renderer {
                     bg,
                 );
 
+                // Chrome, not text: the cursor never dims.
+                let cursor_fg = fg;
+                let styled = flags.intersects(STYLED);
+                let mut style = 0;
+                if styled {
+                    if flags.contains(Flags::DIM) {
+                        fg = blend(bg, fg, DIM_ALPHA);
+                    }
+                    style = style_bits(flags);
+                }
+
                 if ch != ' ' && ch != '\0' {
-                    self.blit(buf, width, height, x0, y0, ch, fg, bg);
+                    self.blit(buf, width, height, x0, y0, ch, style, fg, bg);
+                }
+
+                // Spaces carry them too, so this cannot live under the blit.
+                if styled {
+                    self.draw_lines(buf, width, height, x0, y0, span, right, flags, fg);
                 }
 
                 if on_cursor {
-                    self.draw_cursor(buf, width, height, x0, y0, cursor_look, fg);
+                    self.draw_cursor(buf, width, height, x0, y0, cursor_look, cursor_fg);
                 }
             }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_lines(
+        &self,
+        buf: &mut [u32],
+        width: usize,
+        height: usize,
+        x0: usize,
+        y0: usize,
+        span: usize,
+        right: usize,
+        flags: Flags,
+        fg: u32,
+    ) {
+        // The column loop fits one cell in the pane, not the pair, and `fill_rect`
+        // clips to the buffer.
+        let w = (self.cell_w * span).min(right.saturating_sub(x0));
+        if flags.intersects(Flags::ALL_UNDERLINES) {
+            let y = y0 + self.underline_y;
+            fill_rect(buf, width, height, x0, y, w, self.line_thickness, fg);
+        }
+        if flags.contains(Flags::STRIKEOUT) {
+            let y = y0 + self.strikeout_y;
+            fill_rect(buf, width, height, x0, y, w, self.line_thickness, fg);
         }
     }
 
@@ -504,11 +662,12 @@ impl Renderer {
         x0: usize,
         y0: usize,
         ch: char,
+        style: u8,
         fg: u32,
         bg: u32,
     ) {
         let baseline = self.baseline;
-        let g = self.glyph(ch);
+        let g = self.glyph(ch, style);
         for gy in 0..g.height {
             let y = y0 as i32 + baseline - g.top + gy as i32;
             if y < 0 || y as usize >= height {
@@ -550,6 +709,16 @@ fn metrics(font: &Font, px: f32) -> Option<(usize, usize, i32)> {
     Some((cell_w, cell_h, lm.ascent.ceil() as i32))
 }
 
+/// Fractions of the em, which is what `px` measures: fontdue exposes no
+/// underline or strikeout metrics.
+fn line_metrics(px: f32, baseline: i32, cell_h: usize) -> (usize, usize, usize) {
+    let thickness = (px * 0.049).round().max(1.0) as usize;
+    let last = cell_h.saturating_sub(thickness) as i32;
+    let under = (baseline + thickness as i32).clamp(0, last);
+    let strike = (baseline - (px * 0.31).round() as i32).clamp(0, last);
+    (under as usize, strike as usize, thickness)
+}
+
 fn blend(bg: u32, fg: u32, a: u8) -> u32 {
     let mix = |shift: u32| {
         let b = ((bg >> shift) & 0xff) as i32;
@@ -581,6 +750,7 @@ fn fill_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vt_core::{SelectionType, Side};
 
     const FONT_CANDIDATES: &[&str] = &[
         r"C:\Windows\Fonts\CascadiaMono.ttf",
@@ -797,9 +967,9 @@ mod tests {
     #[test]
     fn glyphs_are_rerasterised_not_scaled() {
         let mut r = renderer();
-        let small = r.glyph('M').coverage.len();
+        let small = r.glyph('M', 0).coverage.len();
         r.set_font_size(32.0);
-        let big = r.glyph('M').coverage.len();
+        let big = r.glyph('M', 0).coverage.len();
         assert!(
             big > small,
             "the glyph should rasterise larger: {small} -> {big}"
@@ -976,6 +1146,469 @@ mod tests {
         assert_eq!(slab(&mut r), 0x00dc_ecf5);
         r.set_colors(0x0000_0000, 0x00ff_ffff);
         assert_eq!(slab(&mut r), 0x0000_0000);
+    }
+
+    fn added_rows(sgr: &str, text: &str) -> Vec<usize> {
+        let mut r = renderer();
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        // One grid row inside a taller buffer: with a second row the next row's
+        // own background fill would hide anything spilling below the cell.
+        let frame = |r: &mut Renderer, prefix: &str| {
+            let mut term = Terminal::new(TermSize::new(4, 1));
+            term.feed(format!("{prefix}{text}").as_bytes());
+            let mut buf = vec![0u32; w * h];
+            r.clear(&mut buf);
+            r.draw_into(&term, &mut buf, w, h, (0, 0, w, ch), CursorLook::Hidden);
+            buf
+        };
+        let plain = frame(&mut r, "");
+        let styled = frame(&mut r, sgr);
+        (0..h)
+            .filter(|&y| (0..cw).any(|x| styled[y * w + x] != plain[y * w + x]))
+            .collect()
+    }
+
+    #[test]
+    fn an_underline_lands_below_the_glyph_and_inside_the_cell() {
+        let (_, ch) = renderer().cell_size();
+        let rows = added_rows("\x1b[4m", "X");
+        assert!(!rows.is_empty(), "the underline was not drawn");
+        assert!(rows.len() <= 2, "it covers {} rows", rows.len());
+        assert!(rows[0] > ch / 2, "it sits at row {} of {ch}", rows[0]);
+        assert!(*rows.last().unwrap() < ch, "it spills out of the cell");
+    }
+
+    #[test]
+    fn an_underlined_space_is_still_underlined() {
+        assert!(
+            !added_rows("\x1b[4m", " ").is_empty(),
+            "a space lost its underline"
+        );
+    }
+
+    #[test]
+    fn every_underline_style_draws_a_line() {
+        for sgr in [
+            "\x1b[4m",
+            "\x1b[4:2m",
+            "\x1b[4:3m",
+            "\x1b[4:4m",
+            "\x1b[4:5m",
+        ] {
+            assert!(!added_rows(sgr, "X").is_empty(), "{sgr:?} drew nothing");
+        }
+    }
+
+    #[test]
+    fn a_strikeout_crosses_the_middle_of_the_cell() {
+        let (_, ch) = renderer().cell_size();
+        let rows = added_rows("\x1b[9m", " ");
+        assert!(!rows.is_empty(), "the strikeout was not drawn");
+        assert!(rows.len() <= 2, "it covers {} rows", rows.len());
+        assert!(
+            rows[0] > 0 && *rows.last().unwrap() < ch,
+            "{rows:?} is not inside the cell"
+        );
+    }
+
+    #[test]
+    fn the_lines_follow_the_cell_into_a_second_column_when_the_char_is_wide() {
+        let mut r = renderer();
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        // Two columns in a wider pane, one grid row: a cell drawn after this one
+        // would erase an overrun with its own background fill.
+        let aw = cw * 3;
+        let shot = |r: &mut Renderer, prefix: &str| {
+            let mut term = Terminal::new(TermSize::new(2, 1));
+            term.feed(format!("{prefix}中").as_bytes());
+            let mut buf = vec![0u32; w * h];
+            r.clear(&mut buf);
+            r.draw_into(&term, &mut buf, w, h, (0, 0, aw, ch), CursorLook::Hidden);
+            buf
+        };
+        let plain = shot(&mut r, "");
+        let styled = shot(&mut r, "\x1b[4;9m");
+
+        let ox = (aw - 2 * cw) / 2;
+        let y = r.underline_y;
+        let marked: Vec<usize> = (0..w)
+            .filter(|&x| styled[y * w + x] != plain[y * w + x])
+            .collect();
+        assert_eq!(
+            marked,
+            (ox..ox + 2 * cw).collect::<Vec<_>>(),
+            "the underline does not cover the wide pair"
+        );
+        assert!(
+            !(ch..h).any(|y| (0..w).any(|x| styled[y * w + x] != plain[y * w + x])),
+            "the lines spilled below the cell"
+        );
+    }
+
+    #[test]
+    fn the_lines_stay_inside_a_pane_narrower_than_the_wide_cell() {
+        let (fg, bg) = (0x00ff_ffff, 0x0000_0000);
+        let mut r = renderer();
+        r.set_colors(fg, bg);
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        let shot = |r: &mut Renderer, prefix: &str, aw: usize| {
+            let mut term = Terminal::new(TermSize::new(2, 1));
+            term.feed(format!("{prefix}中").as_bytes());
+            let mut buf = vec![0u32; w * h];
+            r.draw_into(&term, &mut buf, w, h, (0, 0, aw, ch), CursorLook::Hidden);
+            buf
+        };
+
+        for aw in [cw, 2 * cw - 1] {
+            let plain = shot(&mut r, "", aw);
+            let buf = shot(&mut r, "\x1b[4;9m", aw);
+
+            let y = r.underline_y;
+            let marked: Vec<usize> = (0..w)
+                .filter(|&x| buf[y * w + x] != plain[y * w + x])
+                .collect();
+            assert_eq!(
+                marked,
+                (0..aw).collect::<Vec<_>>(),
+                "a pane {aw}px wide did not underline every pixel of it"
+            );
+
+            let outside: Vec<usize> = (0..h)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .filter(|&(x, y)| (x >= aw || y >= ch) && buf[y * w + x] == fg)
+                .map(|(x, _)| x)
+                .collect();
+            assert!(
+                outside.is_empty(),
+                "a pane {aw}px wide painted {} foreground pixels outside it, up to x={:?}",
+                outside.len(),
+                outside.iter().max()
+            );
+        }
+    }
+
+    #[test]
+    fn the_lines_stay_inside_the_cell_at_every_font_size() {
+        let mut r = renderer();
+        for px in [MIN_FONT_PX, 9.0, 16.0, 33.0, MAX_FONT_PX] {
+            r.set_font_size(px);
+            let (_, ch) = r.cell_size();
+            assert!(
+                r.underline_y + r.line_thickness <= ch && r.strikeout_y + r.line_thickness <= ch,
+                "{px}px: underline {} strikeout {} thickness {} in {ch}",
+                r.underline_y,
+                r.strikeout_y,
+                r.line_thickness
+            );
+            assert!(r.strikeout_y < r.underline_y, "{px}px: the lines crossed");
+        }
+    }
+
+    fn frame(r: &mut Renderer, sgr: &str, text: &str) -> Vec<u32> {
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        let mut term = Terminal::new(TermSize::new(4, 2));
+        term.feed(format!("{sgr}{text}").as_bytes());
+        let mut buf = vec![0u32; w * h];
+        r.clear(&mut buf);
+        r.draw(&term, &mut buf, w, h, CursorLook::Hidden);
+        buf
+    }
+
+    fn inked(r: &mut Renderer, sgr: &str, text: &str) -> usize {
+        let (cw, ch) = r.cell_size();
+        let w = cw * 4;
+        let buf = frame(r, sgr, text);
+        (0..ch)
+            .flat_map(|y| (0..cw).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[y * w + x] != DEFAULT_BG)
+            .count()
+    }
+
+    #[test]
+    fn bold_puts_more_ink_in_the_cell() {
+        let mut r = renderer();
+        let plain = inked(&mut r, "", "X");
+        let bold = inked(&mut r, "\x1b[1m", "X");
+        assert!(bold > plain, "bold {bold} vs regular {plain} pixels");
+    }
+
+    #[test]
+    fn the_cache_serves_each_style_its_own_glyph() {
+        let mut first_plain = renderer();
+        let plain = frame(&mut first_plain, "", "X");
+        let bold_second = frame(&mut first_plain, "\x1b[1m", "X");
+
+        let mut first_bold = renderer();
+        let bold = frame(&mut first_bold, "\x1b[1m", "X");
+        let plain_second = frame(&mut first_bold, "", "X");
+
+        assert_ne!(plain, bold, "bold drew the regular glyph");
+        assert_eq!(
+            plain, plain_second,
+            "a cached bold glyph leaked into regular"
+        );
+        assert_eq!(bold, bold_second, "a cached regular glyph leaked into bold");
+    }
+
+    #[test]
+    fn bold_dilates_every_row_rightwards_and_nowhere_else() {
+        use std::collections::BTreeSet;
+
+        let mut r = renderer();
+        let dilate = (r.font_size() / 16.0).round().max(1.0) as usize;
+        for c in "MH".chars() {
+            let plain = {
+                let g = r.glyph(c, 0);
+                (g.left, g.width, g.height, g.coverage.clone())
+            };
+            let bold = {
+                let g = r.glyph(c, STYLE_BOLD);
+                (g.left, g.width, g.height, g.coverage.clone())
+            };
+            assert_eq!(bold.0, plain.0, "{c:?} moved its left edge");
+            assert_eq!(
+                bold.1,
+                plain.1 + dilate,
+                "{c:?} was clipped, so a shift cannot show"
+            );
+            assert_eq!(bold.2, plain.2, "{c:?} changed height");
+
+            for gy in 0..plain.2 {
+                let want: BTreeSet<usize> = (0..plain.1)
+                    .filter(|&gx| plain.3[gy * plain.1 + gx] != 0)
+                    .flat_map(|gx| (0..=dilate).map(move |k| gx + k))
+                    .collect();
+                let got: BTreeSet<usize> = (0..bold.1)
+                    .filter(|&gx| bold.3[gy * bold.1 + gx] != 0)
+                    .collect();
+                assert_eq!(got, want, "{c:?} row {gy} landed elsewhere");
+            }
+        }
+    }
+
+    #[test]
+    fn bold_stays_inside_the_cell_the_glyph_already_used() {
+        let mut r = renderer();
+        let (cw, _) = r.cell_size();
+        for c in "XMi#(".chars() {
+            let (left, width) = {
+                let g = r.glyph(c, 0);
+                (g.left, g.width as i32)
+            };
+            let g = r.glyph(c, STYLE_BOLD);
+            assert!(g.left >= left.min(0), "{c:?} grew leftwards");
+            assert!(
+                g.left + g.width as i32 <= (left + width).max(cw as i32),
+                "{c:?} grew past the cell"
+            );
+        }
+    }
+
+    #[test]
+    fn bold_leaves_line_art_alone() {
+        let mut r = renderer();
+        for c in "┌─┐│█".chars() {
+            let text = c.to_string();
+            assert_eq!(
+                frame(&mut r, "\x1b[1m", &text),
+                frame(&mut r, "", &text),
+                "{c:?} was emboldened and will no longer meet its neighbour"
+            );
+        }
+    }
+
+    fn top_centre(r: &mut Renderer, sgr: &str) -> f32 {
+        let (cw, ch) = r.cell_size();
+        let w = cw * 4;
+        let buf = frame(r, sgr, "H");
+        let lit: Vec<usize> = (0..ch / 3)
+            .flat_map(|y| (0..cw).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[y * w + x] != DEFAULT_BG)
+            .map(|(x, _)| x)
+            .collect();
+        assert!(!lit.is_empty(), "{sgr:?} inked nothing to measure");
+        lit.iter().sum::<usize>() as f32 / lit.len() as f32
+    }
+
+    #[test]
+    fn italic_leans_the_top_of_the_glyph_to_the_right() {
+        let mut r = renderer();
+        let plain = top_centre(&mut r, "");
+        let italic = top_centre(&mut r, "\x1b[3m");
+        assert!(italic > plain, "italic {italic} vs regular {plain}");
+    }
+
+    #[test]
+    fn the_slant_keeps_the_top_of_a_glyph_a_pixel_short_of_the_cell_edge() {
+        let mut r = renderer();
+        let (cw, ch) = r.cell_size();
+        let w = cw * 4;
+        let top_ink = |r: &mut Renderer, sgr: &str, c: char| {
+            let buf = frame(r, sgr, &c.to_string());
+            (0..ch / 3)
+                .flat_map(|y| (0..cw).map(move |x| (x, y)))
+                .filter(|&(x, y)| buf[y * w + x] != DEFAULT_BG)
+                .count()
+        };
+        for c in "MHX@".chars() {
+            let (left, width) = {
+                let g = r.glyph(c, 0);
+                (g.left, g.width as i32)
+            };
+            assert_eq!(
+                cw as i32 - left - width,
+                1,
+                "{c:?} is not a pixel short of the cell edge"
+            );
+            let plain = top_ink(&mut r, "", c);
+            assert!(plain > 0, "{c:?} inked nothing in its top third");
+            assert_eq!(
+                top_ink(&mut r, "\x1b[3m", c),
+                plain,
+                "{c:?} lost ink from its top third to the clip"
+            );
+        }
+    }
+
+    #[test]
+    fn bold_italic_is_neither_bold_nor_italic() {
+        let mut r = renderer();
+        let plain = frame(&mut r, "", "X");
+        let bold = frame(&mut r, "\x1b[1m", "X");
+        let italic = frame(&mut r, "\x1b[3m", "X");
+        let both = frame(&mut r, "\x1b[1;3m", "X");
+        for (name, other) in [("regular", &plain), ("bold", &bold), ("italic", &italic)] {
+            assert_ne!(&both, other, "bold italic came out as {name}");
+        }
+    }
+
+    #[test]
+    fn a_slanted_glyph_stays_inside_the_cell_the_glyph_already_used() {
+        let mut r = renderer();
+        let (cw, _) = r.cell_size();
+        for c in "Xgjf|".chars() {
+            let (left, width) = {
+                let g = r.glyph(c, 0);
+                (g.left, g.width as i32)
+            };
+            for style in [STYLE_ITALIC, STYLE_BOLD | STYLE_ITALIC] {
+                let g = r.glyph(c, style);
+                assert!(g.left >= left.min(0), "{c:?} style {style} grew leftwards");
+                assert!(
+                    g.left + g.width as i32 <= (left + width).max(cw as i32),
+                    "{c:?} style {style} grew past the cell"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn italic_leaves_line_art_alone() {
+        let mut r = renderer();
+        for c in "┌─┐│█".chars() {
+            let text = c.to_string();
+            assert_eq!(
+                frame(&mut r, "\x1b[3m", &text),
+                frame(&mut r, "", &text),
+                "{c:?} was slanted and will no longer meet its neighbour"
+            );
+        }
+    }
+
+    /// A pixel on the strikeout of the second cell: a solid run of foreground,
+    /// so the sample does not depend on where a glyph puts its ink.
+    fn struck_pixel(sgr: &str, fg: u32, bg: u32) -> u32 {
+        let mut r = renderer();
+        r.set_colors(fg, bg);
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        let mut term = Terminal::new(TermSize::new(4, 2));
+        term.feed(format!("{sgr}  ").as_bytes());
+        let mut buf = vec![0u32; w * h];
+        r.clear(&mut buf);
+        r.draw(&term, &mut buf, w, h, CursorLook::Hidden);
+        buf[r.strikeout_y * w + cw + cw / 2]
+    }
+
+    #[test]
+    fn dim_moves_the_foreground_towards_the_background() {
+        let (fg, bg) = (0x00ff_ffff, 0x0000_0000);
+        let plain = struck_pixel("\x1b[9m", fg, bg);
+        let dim = struck_pixel("\x1b[2;9m", fg, bg);
+        assert_eq!(plain, fg);
+        assert!(dim != plain && dim != bg, "dim gave {dim:06x}");
+        assert_eq!(dim, blend(bg, fg, DIM_ALPHA));
+    }
+
+    #[test]
+    fn dim_alone_fades_the_glyph_of_a_cell_carrying_no_other_attribute() {
+        let (fg, bg) = (0x00ff_ffff, 0x0000_0000);
+        let mut r = renderer();
+        r.set_colors(fg, bg);
+        let (cw, ch) = r.cell_size();
+        let w = cw * 4;
+        let plain = frame(&mut r, "", "X");
+        let dim = frame(&mut r, "\x1b[2m", "X");
+
+        let solid: Vec<usize> = (0..ch)
+            .flat_map(|y| (0..cw).map(move |x| y * w + x))
+            .filter(|&i| plain[i] == fg)
+            .collect();
+        assert!(!solid.is_empty(), "the glyph inked nothing to compare");
+        for i in solid {
+            assert_eq!(
+                dim[i],
+                blend(bg, fg, DIM_ALPHA),
+                "pixel {i} kept the full foreground"
+            );
+        }
+    }
+
+    #[test]
+    fn dim_under_inverse_fades_towards_the_cell_it_is_drawn_on() {
+        let (fg, bg) = (0x00ff_ffff, 0x0000_0000);
+        let dim = struck_pixel("\x1b[7;2;9m", fg, bg);
+        assert_eq!(dim, blend(fg, bg, DIM_ALPHA));
+    }
+
+    #[test]
+    fn dim_keeps_selected_text_legible() {
+        let (fg, bg) = (0x00ff_ffff, 0x0000_0000);
+        let mut r = renderer();
+        r.set_colors(fg, bg);
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        let mut term = Terminal::new(TermSize::new(4, 2));
+        term.feed(b"\x1b[2;9m  ");
+        term.start_selection(0, 0, Side::Left, SelectionType::Simple);
+        term.update_selection(0, 3, Side::Right);
+
+        let mut buf = vec![0u32; w * h];
+        r.clear(&mut buf);
+        r.draw(&term, &mut buf, w, h, CursorLook::Hidden);
+        let line = buf[r.strikeout_y * w + cw + cw / 2];
+        assert_eq!(line, blend(fg, bg, DIM_ALPHA), "got {line:06x}");
+    }
+
+    #[test]
+    fn the_cursor_is_never_dimmed() {
+        let (fg, bg) = (0x00ff_ffff, 0x0000_0000);
+        let mut r = renderer();
+        r.set_colors(fg, bg);
+        let (cw, ch) = r.cell_size();
+        let (w, h) = (cw * 4, ch * 2);
+        let mut term = Terminal::new(TermSize::new(4, 2));
+        // The space carries the attribute; the return parks the cursor on it.
+        term.feed(b"\x1b[2m \r");
+
+        let mut buf = vec![0u32; w * h];
+        r.clear(&mut buf);
+        r.draw(&term, &mut buf, w, h, CursorLook::Beam);
+        assert_eq!(buf[(ch / 2) * w], fg);
     }
 
     #[test]
