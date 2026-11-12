@@ -1219,8 +1219,6 @@ mod tests {
         let styled = shot(&mut r, "\x1b[4;9m");
 
         let ox = (aw - 2 * cw) / 2;
-        // The underline row, which the glyph does not reach: on the strikeout row
-        // ink already at full foreground cannot show the line.
         let y = r.underline_y;
         let marked: Vec<usize> = (0..w)
             .filter(|&x| styled[y * w + x] != plain[y * w + x])
@@ -1432,7 +1430,7 @@ mod tests {
     }
 
     #[test]
-    fn the_slant_keeps_the_top_of_a_glyph_that_reaches_the_cell_edge() {
+    fn the_slant_keeps_the_top_of_a_glyph_a_pixel_short_of_the_cell_edge() {
         let mut r = renderer();
         let (cw, ch) = r.cell_size();
         let w = cw * 4;
@@ -1448,10 +1446,10 @@ mod tests {
                 let g = r.glyph(c, 0);
                 (g.left, g.width as i32)
             };
-            assert!(
-                left + width >= cw as i32 - 1,
-                "{c:?} stops {}px short of the cell edge, the clip cannot bite",
-                cw as i32 - left - width
+            assert_eq!(
+                cw as i32 - left - width,
+                1,
+                "{c:?} is not a pixel short of the cell edge"
             );
             let plain = top_ink(&mut r, "", c);
             assert!(plain > 0, "{c:?} inked nothing in its top third");
