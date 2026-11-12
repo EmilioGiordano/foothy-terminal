@@ -104,7 +104,9 @@ impl Panes {
         if let Ok(cwd) = std::env::current_dir() {
             cmd.cwd(cwd);
         }
-        let pty = match Pty::spawn_with_waker(cmd, size, waker) {
+        let term = Terminal::with_cursor(size, CursorShape::Beam);
+        // The grid clamps its width, so the shell is born knowing what it took.
+        let pty = match Pty::spawn_with_waker(cmd, term.size(), waker) {
             Ok(pty) => Some(pty),
             Err(e) => {
                 eprintln!("could not open the PTY: {e}");
@@ -114,7 +116,7 @@ impl Panes {
         self.panes.insert(
             id,
             Pane {
-                term: Terminal::with_cursor(size, CursorShape::Beam),
+                term,
                 pty,
                 ending: None,
                 number: self.next_number,
